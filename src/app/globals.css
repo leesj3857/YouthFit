@@ -293,6 +293,11 @@
       opacity: 0;
     }
   }
+  /* 상세 페이지에서 돌아와 복원된 대화는 등장 애니메이션을 다시 틀지 않는다 */
+  [data-restored],
+  [data-restored] * {
+    animation: none !important;
+  }
   /* 복원된 메시지처럼 애니메이션 없이 바로 보여야 할 때 */
   .reveal[data-instant] {
     transition: none;

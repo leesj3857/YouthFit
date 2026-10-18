@@ -242,7 +242,6 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     setBusy(false);
     setInput("");
     window.scrollTo({ top: 0 });
-    textareaRef.current?.focus();
   }
 
   /* ----- URL ?q= 로 들어오면 바로 시작, 아니면 이전 대화 복원 ----- */
@@ -513,7 +512,7 @@ function MessageView({
 
   if (msg.role === "user") {
     return (
-      <div data-msg={msg.id} className="flex animate-fade-up justify-end">
+      <div data-msg={msg.id} data-restored={msg.restored ? "" : undefined} className="flex animate-fade-up justify-end">
         <p className="max-w-[80%] whitespace-pre-wrap rounded-[22px] rounded-br-md bg-brand px-4 py-2.5 text-[16px] leading-relaxed text-white">
           {msg.text}
         </p>
@@ -523,7 +522,7 @@ function MessageView({
 
   return (
     // 검색 단계 바로 다음 답변은 같은 덩어리처럼 붙여서 보여준다
-    <div className={cn(afterThinking && "-mt-4")}>
+    <div data-restored={msg.restored ? "" : undefined} className={cn(afterThinking && "-mt-4")}>
       {showName && (
         <p className="mb-2 flex items-center gap-1.5 text-[13px] font-semibold text-grey-600">
           <span className="flex size-5 items-center justify-center rounded-md bg-brand">
@@ -552,7 +551,7 @@ function MessageView({
 
           {msg.rec && streamed && (
             <Reveal instant={msg.restored}>
-              <RecommendationView rec={msg.rec} />
+              <RecommendationView rec={msg.rec} animate={!msg.restored} />
             </Reveal>
           )}
 

@@ -10,9 +10,10 @@ import { cn } from "@/lib/utils";
 
 const stagger = (i: number): CSSProperties => ({ animationDelay: `${i * 70}ms` });
 
-function useCountUp(target: number, ms = 900) {
-  const [v, setV] = useState(0);
+function useCountUp(target: number, animate: boolean, ms = 900) {
+  const [v, setV] = useState(animate ? 0 : target);
   useEffect(() => {
+    if (!animate) return;
     let raf = 0;
     const t0 = performance.now();
     const loop = (t: number) => {
@@ -22,7 +23,7 @@ function useCountUp(target: number, ms = 900) {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [target, ms]);
+  }, [target, animate, ms]);
   return v;
 }
 
@@ -32,8 +33,9 @@ const STATUS_TONE = {
   상시: "text-grey-500",
 } as const;
 
-export function RecommendationView({ rec }: { rec: Recommendation }) {
-  const total = useCountUp(rec.yearlyTotal);
+/** animate=false: 상세 페이지에서 돌아와 복원된 경우 — 숫자 카운트업·등장 애니메이션 없이 바로 */
+export function RecommendationView({ rec, animate = true }: { rec: Recommendation; animate?: boolean }) {
+  const total = useCountUp(rec.yearlyTotal, animate);
 
   return (
     <div className="mt-6">
