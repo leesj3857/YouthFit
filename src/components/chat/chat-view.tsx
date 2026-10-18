@@ -88,6 +88,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
 
   const lastUserSeen = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
 
   const push = (m: Msg) => setMessages((ms) => [...ms, m]);
   const patch = (id: string, p: Partial<Msg>) =>
@@ -309,8 +310,45 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       if (docTop(r) < anchor) collapsing += r.offsetHeight;
     }
     const restored = first && messages.some((m) => "restored" in m && m.restored);
-    window.scrollTo({ top: Math.max(0, anchor - collapsing - TOP_GAP), behavior: restored ? "instant" : "smooth" });
+    // 상세 페이지에서 돌아온 경우엔 떠나기 전에 보던 위치로
+    const saved = restored ? Number(readSession(SCROLL_KEY) ?? NaN) : NaN;
+    if (!Number.isNaN(saved)) window.scrollTo({ top: saved, behavior: "instant" });
+    else window.scrollTo({ top: Math.max(0, anchor - collapsing - TOP_GAP), behavior: restored ? "instant" : "smooth" });
   }, [messages]);
+
+  /* ----- 모바일 키보드: 화면 아래 고정된 입력창을 키보드 바로 위로 올린다 -----
+   * iOS 는 키보드가 열려도 fixed 요소의 기준(레이아웃 뷰포트)이 그대로라 입력창이 키보드에 가려진다.
+   * 실제로 보이는 영역(visualViewport)과의 차이만큼 띄운다. */
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => {
+      const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      composerRef.current?.style.setProperty("--kb", `${Math.round(kb)}px`);
+    };
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
+
+  /* ----- 보던 스크롤 위치 기억: 링크를 누르는 순간에 저장한다 -----
+   * (스크롤할 때마다 저장하면 페이지를 떠나며 맨 위로 올라가는 순간의 0이 덮어써 버린다) */
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || !e.target.closest("a[href]")) return;
+      try {
+        sessionStorage.setItem(SCROLL_KEY, String(Math.round(window.scrollY)));
+      } catch {
+        // 저장 실패는 무시
+      }
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, []);
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -377,7 +415,10 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       </main>
 
       {/* ---------- 입력창 ---------- */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 bg-gradient-to-t from-background from-60% to-transparent pt-8 sm:pt-10">
+      <div
+        ref={composerRef}
+        style={{ bottom: "var(--kb, 0px)" }}
+        className="pointer-events-none fixed inset-x-0 z-20 bg-gradient-to-t from-background from-60% to-transparent pt-8 sm:pt-10">
         <div className="pointer-events-auto mx-auto max-w-[720px] px-5 pb-[max(1rem,env(safe-area-inset-bottom))]">
           <form
             onSubmit={(e) => {
@@ -559,6 +600,16 @@ function groupTurns(messages: Msg[]) {
     turns[turns.length - 1].push({ msg, i });
   });
   return turns;
+}
+
+const SCROLL_KEY = `${STORE_KEY}:scroll`;
+
+function readSession(key: string) {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
 
 /** 상단 바(56px) + 여유 16px — 내 메시지가 멈추는 위치 */
