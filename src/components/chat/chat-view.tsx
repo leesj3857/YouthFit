@@ -87,6 +87,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   const firstQuery = useRef<string | undefined>(undefined);
 
   const stick = useRef(true);
+  const threadRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const push = (m: Msg) => setMessages((ms) => [...ms, m]);
@@ -296,10 +297,11 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     }
   }, [messages, busy]);
 
-  /* ----- 맨 아래 따라가기: 높이가 늘어나면 즉시 점프하지 않고 매 프레임 조금씩 따라 내려간다 ----- */
+  /* ----- 맨 아래 따라가기: 높이가 늘어나면 즉시 점프하지 않고 일정한 속도로 따라 내려간다 ----- */
   useEffect(() => {
     const el = document.documentElement;
-    const gap = () => el.scrollHeight - (window.scrollY + window.innerHeight);
+    // innerHeight 는 모바일 주소창이 접히고 펴질 때마다 바뀌어 흔들림을 만든다 → 고정된 clientHeight 사용
+    const gap = () => el.scrollHeight - (window.scrollY + el.clientHeight);
     // 사용자가 위로 올리려는 의도가 보이면 따라가기를 멈추고, 다시 바닥 근처로 오면 재개
     const release = () => (stick.current = false);
     const onWheel = (e: WheelEvent) => e.deltaY < 0 && release();
@@ -316,13 +318,38 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     window.addEventListener("scroll", onScroll, { passive: true });
 
     let raf = 0;
-    const follow = () => {
+    let y = window.scrollY; // 소수점 위치를 직접 들고 있어야 1px 미만 이동이 반올림에 먹히지 않는다
+    let v = 0; // px/s
+    let last = performance.now();
+    let floor = { node: null as HTMLDivElement | null, h: 0 };
+    const follow = (now: number) => {
+      // 답한 선택지가 접히며 대화 높이가 줄면 브라우저가 스크롤을 위로 확 끌어올린다 → 높이는 줄어들지 않게 붙잡아 둔다
+      const t = threadRef.current;
+      if (t !== floor.node) floor = { node: t, h: 0 };
+      const lastChild = t?.lastElementChild;
+      if (t && lastChild) {
+        const h = lastChild.getBoundingClientRect().bottom - t.getBoundingClientRect().top;
+        if (h > floor.h) {
+          floor.h = h;
+          t.style.minHeight = `${h}px`;
+        }
+      }
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      if (Math.abs(window.scrollY - y) > 2) y = window.scrollY; // 사용자가 직접 움직였으면 그 위치부터
       // 긴 답변이 한 번에 붙어도 그 답변의 시작 부분이 상단 바 아래에 걸리면 거기서 멈춘다 (헤드라인이 위로 지나가지 않게)
       const turns = document.querySelectorAll<HTMLElement>("[data-assistant-turn]");
       const turnTop = turns.length ? turns[turns.length - 1].getBoundingClientRect().top - 72 : Infinity;
       const d = Math.min(gap(), turnTop);
-      // 남은 거리의 10%씩, 프레임당 최대 32px — 멀면 일정하게, 가까워질수록 감속
-      if (stick.current && d > 0.5) window.scrollTo(0, window.scrollY + Math.min(32, Math.max(0.5, d * 0.1)));
+      if (stick.current && d > 0.5) {
+        // 목표 속도 자체를 부드럽게 바꾼다 — 줄이 바뀔 때마다 가속·감속을 반복하던 "덜덜거림" 대신 일정한 흐름
+        const want = Math.min(1400, d * 3.5);
+        v += (want - v) * Math.min(1, dt * 5);
+        y += Math.min(d, v * dt);
+        window.scrollTo(0, y);
+      } else {
+        v = 0;
+      }
       raf = requestAnimationFrame(follow);
     };
     raf = requestAnimationFrame(follow);
@@ -349,7 +376,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   return (
     <div className="flex min-h-svh flex-col bg-background">
       {/* ---------- 상단 바 ---------- */}
-      <header className="sticky top-0 z-30 bg-background/85 backdrop-blur-md">
+      <header className="sticky top-0 z-30 bg-background/95 sm:bg-background/85 sm:backdrop-blur-md">
         <div className="mx-auto flex h-14 max-w-[720px] items-center justify-between px-5">
           <Link href="/" className="flex items-center gap-2 text-[17px] font-bold tracking-tight text-grey-900">
             <span className="flex size-6 items-center justify-center rounded-lg bg-brand">
@@ -375,7 +402,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
         {empty ? (
           <EmptyState onPick={send} />
         ) : (
-          <div className="space-y-7 pt-6">
+          <div ref={threadRef} className="space-y-7 pt-6">
             {messages.map((m, i) => (
               <MessageView
                 key={m.id}
