@@ -2,13 +2,15 @@
 
 import { useEffect, useState, type CSSProperties } from "react";
 import Link from "next/link";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, ThumbsDown, ThumbsUp } from "lucide-react";
 import { daysLeft, estimateMaturity, formatDate, formatManwon } from "@/lib/format";
 import type { ChatReply, RecPolicy } from "@/lib/rag/types";
 import { BankMark, InterestIcon } from "@/components/catalog-icons";
 import { cn } from "@/lib/utils";
 
 export type ResultReply = Extract<ChatReply, { type: "result" }>;
+/** 피드백 분석용 요약 (원문 대화는 보내지 않음) */
+export type FeedbackMeta = { age?: number; sido?: string; employment?: string; domains?: string[] };
 
 const stagger = (i: number): CSSProperties => ({ animationDelay: `${i * 70}ms` });
 
@@ -38,7 +40,7 @@ function deadline(p: RecPolicy): { label: string; tone: string } {
 }
 
 /** animate=false: 상세 페이지에서 돌아와 복원된 경우 — 숫자 카운트업·등장 애니메이션 없이 바로 */
-export function RecommendationView({ rec, animate = true }: { rec: ResultReply; animate?: boolean }) {
+export function RecommendationView({ rec, animate = true, meta }: { rec: ResultReply; animate?: boolean; meta?: FeedbackMeta }) {
   // 대출은 갚아야 하는 돈이라 '받을 수 있는 지원금' 합계에서 뺀다
   const total = rec.policies.filter((p) => p.type !== "대출·이자지원").reduce((s, p) => s + (p.benefitAmount ?? 0), 0);
   const shown = useCountUp(total, animate);
@@ -138,8 +140,14 @@ export function RecommendationView({ rec, animate = true }: { rec: ResultReply; 
         </section>
       )}
 
+      <FeedbackBar ids={[...rec.policies, ...rec.savings].map((x) => x.id)} meta={meta} />
+
       <p className="mt-4 text-[12px] leading-relaxed text-grey-400">
-        온통청년·금융감독원 공시 데이터를 AI로 정리해 자격 조건을 대조했어요 · 실제 자격은 기관 심사에 따라 달라질 수 있어요
+        온통청년·금융감독원 공시 데이터를 AI로 정리해 자격 조건을 대조했어요 · 실제 자격은 기관 심사에 따라 달라질 수 있어요 ·
+        금융상품 가입 권유가 아닌 공시 정보 안내예요 ·{" "}
+        <Link href="/privacy" className="underline underline-offset-2">
+          이용안내·개인정보
+        </Link>
       </p>
     </div>
   );
@@ -151,5 +159,53 @@ function SectionHead({ title, count }: { title: string; count: number }) {
       {title}
       <span className="text-brand">{count}</span>
     </h3>
+  );
+}
+
+const REASONS = ["자격이 안 맞아요", "원하던 분야가 아니에요", "정보가 부정확해요", "더 많은 결과를 원해요", "기타"];
+
+/** 추천 결과 평가 — 👍/👎 (👎이면 이유 한 번 더) */
+function FeedbackBar({ ids, meta }: { ids: string[]; meta?: FeedbackMeta }) {
+  const [state, setState] = useState<"idle" | "why" | "done">("idle");
+  const send = (rating: "up" | "down", reason?: string) => {
+    setState("done");
+    void fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rating, reason, ids, meta }),
+    }).catch(() => {});
+  };
+  return (
+    <div className="mt-6 rounded-2xl bg-grey-50 px-4 py-3.5">
+      {state === "done" ? (
+        <p className="text-[14px] text-grey-600">의견 고마워요. 더 정확한 추천을 만드는 데 쓸게요.</p>
+      ) : state === "why" ? (
+        <>
+          <p className="text-[14px] font-medium text-grey-800">어떤 점이 아쉬웠나요?</p>
+          <div className="mt-2.5 flex flex-wrap gap-2">
+            {REASONS.map((r) => (
+              <button key={r} type="button" onClick={() => send("down", r)}
+                className="pressable rounded-full bg-white px-3 py-1.5 text-[13px] text-grey-700 hover:bg-brand-soft hover:text-brand">
+                {r}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[14px] font-medium text-grey-800">추천이 도움이 됐나요?</p>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => send("up")} aria-label="도움이 됐어요"
+              className="pressable flex size-9 items-center justify-center rounded-full bg-white text-grey-600 hover:text-brand">
+              <ThumbsUp className="size-4" />
+            </button>
+            <button type="button" onClick={() => setState("why")} aria-label="아쉬워요"
+              className="pressable flex size-9 items-center justify-center rounded-full bg-white text-grey-600 hover:text-[#f04452]">
+              <ThumbsDown className="size-4" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

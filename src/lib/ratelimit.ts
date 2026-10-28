@@ -7,12 +7,13 @@
  */
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { createHash } from "node:crypto";
 
 const PER_IP = Number(process.env.RATE_LIMIT_PER_IP ?? 40);
 const GLOBAL = Number(process.env.RATE_LIMIT_GLOBAL ?? 400);
 
 /** 환경변수가 잘못돼도 빌드·서비스가 죽지 않도록 첫 요청 때 만들고, 실패하면 메모리 카운터로 대신한다 */
-let limiters: { ip: Ratelimit; all: Ratelimit } | null | undefined;
+let limiters: { ip: Ratelimit; all: Ratelimit; fb: Ratelimit; redis: Redis } | null | undefined;
 function getLimiters() {
   if (limiters !== undefined) return limiters;
   const url = process.env.UPSTASH_REDIS_REST_URL?.trim().replace(/^["']|["']$/g, "");
@@ -28,6 +29,8 @@ function getLimiters() {
     limiters = {
       ip: new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(PER_IP, "1 d"), prefix: "youthfit:ip" }),
       all: new Ratelimit({ redis, limiter: Ratelimit.fixedWindow(GLOBAL, "1 d"), prefix: "youthfit:all" }),
+      fb: new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(20, "1 d"), prefix: "youthfit:fb" }),
+      redis,
     };
   } catch (e) {
     console.error("[ratelimit] Upstash 연결 설정 실패, 메모리 카운터로 대신합니다:", (e as Error).message);
@@ -47,8 +50,18 @@ function memHit(key: string, limit: number) {
   return e.n <= limit;
 }
 
+/** IP는 원문 그대로 저장하지 않고 해시값만 쓴다 (개인정보 최소화) */
 export function clientIp(req: Request) {
-  return req.headers.get("x-forwarded-for")?.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown";
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() || req.headers.get("x-real-ip") || "unknown";
+  return createHash("sha256").update(`${process.env.RATE_LIMIT_SALT ?? "youthfit"}:${ip}`).digest("hex").slice(0, 32);
+}
+
+/** 피드백 저장용 Redis (없으면 null) */
+export const feedbackRedis = () => getLimiters()?.redis ?? null;
+
+export async function checkFeedbackLimit(ip: string) {
+  const l = getLimiters();
+  return l ? (await l.fb.limit(ip)).success : memHit(`fb:${ip}`, 20);
 }
 
 export async function checkLimit(ip: string): Promise<{ ok: true } | { ok: false; message: string }> {

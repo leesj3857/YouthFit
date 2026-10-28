@@ -16,7 +16,7 @@ import type { AnswerValue, ChatReply, ChatState, Question, QuestionKey } from "@
 import { StreamingText } from "./streaming-text";
 import { QuestionWidget } from "./question-widgets";
 import { Thinking } from "./thinking";
-import { RecommendationView, type ResultReply } from "./recommendation";
+import { RecommendationView, type FeedbackMeta, type ResultReply } from "./recommendation";
 import { cn } from "@/lib/utils";
 
 /* ---------- 메시지 모델 ---------- */
@@ -32,6 +32,7 @@ type Msg = (
       question?: Question;
       answered?: boolean;
       rec?: ResultReply;
+      meta?: FeedbackMeta;
       followUps?: string[];
     }
 ) & {
@@ -153,7 +154,9 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
         return;
       }
       rec.current = reply;
-      push({ id: nid(), role: "assistant", kind: "text", text: reply.summary, rec: reply, followUps: followUpsFor(reply) });
+      const p = state.profile;
+      const meta: FeedbackMeta = { age: p.age, sido: p.sido, employment: p.employment, domains: state.domains };
+      push({ id: nid(), role: "assistant", kind: "text", text: reply.summary, rec: reply, meta, followUps: followUpsFor(reply) });
       setBusy(false);
     },
     [askFromQueue],
@@ -457,7 +460,10 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
             </button>
           </form>
           <p className="mt-2 hidden text-center text-[11px] text-grey-400 sm:block">
-            청핏은 공공데이터를 바탕으로 안내하지만, 최종 자격은 각 기관에서 확인해주세요.
+            주민등록번호 같은 민감한 정보는 입력하지 마세요 · 최종 자격은 각 기관에서 확인해주세요 ·{" "}
+            <Link href="/privacy" className="underline underline-offset-2">
+              이용안내
+            </Link>
           </p>
         </div>
       </div>
@@ -556,7 +562,7 @@ function MessageView({
 
           {msg.rec && streamed && (
             <Reveal instant={msg.restored}>
-              <RecommendationView rec={msg.rec} animate={!msg.restored} />
+              <RecommendationView rec={msg.rec} meta={msg.meta} animate={!msg.restored} />
             </Reveal>
           )}
 
