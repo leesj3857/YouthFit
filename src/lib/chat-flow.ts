@@ -23,9 +23,16 @@ export function formatAnswer(q: Question, raw: AnswerValue): string {
 /** 상세 페이지를 다녀와도 대화를 복원하기 위한 sessionStorage 키 */
 export const STORE_KEY = "youthfit-chat-v2";
 
-export const RAG_STEPS_INTRO = ["질문 이해하기", "정책 1,687건 의미 검색", "자격 조건 대조", "추가로 필요한 정보 정리"];
+export const RAG_STEPS_INTRO = ["질문 이해하기", "정책 1,687건 검색", "자격 조건 대조", "추가로 필요한 정보 정리"];
 export const RAG_STEPS_NEXT = ["답변 반영하기", "자격 조건 다시 대조", "후보 좁히기"];
 export const RAG_STEPS_FINAL = ["자격 조건 대조", "예적금 금리 비교", "추천 이유 정리"];
 export const RAG_STEPS_ASK = ["추천 항목 공고 원문 찾기", "답변 정리"];
 
 export const FOLLOW_UPS = ["1순위 정책 신청 방법이랑 서류 알려줘", "적금 우대금리 조건 자세히 알려줘", "조건 바꿔서 다시 찾기"];
+
+/** 추천 결과에 있는 항목에 맞춰 후속 질문 칩을 고른다 */
+export function followUpsFor(rec: { policies: unknown[]; savings: unknown[] } | null) {
+  return FOLLOW_UPS.filter((f) =>
+    f.startsWith("1순위") ? !!rec?.policies.length : f.startsWith("적금") ? !!rec?.savings.length : true,
+  );
+}

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Keyb
 import Link from "next/link";
 import { ArrowUp, RotateCcw } from "lucide-react";
 import {
-  FOLLOW_UPS,
+  followUpsFor,
   RAG_STEPS_ASK,
   RAG_STEPS_FINAL,
   RAG_STEPS_INTRO,
@@ -153,7 +153,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
         return;
       }
       rec.current = reply;
-      push({ id: nid(), role: "assistant", kind: "text", text: reply.summary, rec: reply, followUps: FOLLOW_UPS });
+      push({ id: nid(), role: "assistant", kind: "text", text: reply.summary, rec: reply, followUps: followUpsFor(reply) });
       setBusy(false);
     },
     [askFromQueue],
@@ -218,7 +218,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       token,
     );
     if (!r) return;
-    push({ id: nid(), role: "assistant", kind: "text", text: r.text, followUps: FOLLOW_UPS });
+    push({ id: nid(), role: "assistant", kind: "text", text: r.text, followUps: followUpsFor(rec.current) });
     setBusy(false);
   }
 
