@@ -11,10 +11,29 @@ import { Redis } from "@upstash/redis";
 const PER_IP = Number(process.env.RATE_LIMIT_PER_IP ?? 40);
 const GLOBAL = Number(process.env.RATE_LIMIT_GLOBAL ?? 400);
 
-const redis =
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN ? Redis.fromEnv() : null;
-const ipLimiter = redis && new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(PER_IP, "1 d"), prefix: "youthfit:ip" });
-const globalLimiter = redis && new Ratelimit({ redis, limiter: Ratelimit.fixedWindow(GLOBAL, "1 d"), prefix: "youthfit:all" });
+/** 환경변수가 잘못돼도 빌드·서비스가 죽지 않도록 첫 요청 때 만들고, 실패하면 메모리 카운터로 대신한다 */
+let limiters: { ip: Ratelimit; all: Ratelimit } | null | undefined;
+function getLimiters() {
+  if (limiters !== undefined) return limiters;
+  const url = process.env.UPSTASH_REDIS_REST_URL?.trim().replace(/^["']|["']$/g, "");
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN?.trim().replace(/^["']|["']$/g, "");
+  limiters = null;
+  if (!url || !token) return limiters;
+  if (!url.startsWith("https://")) {
+    console.error("[ratelimit] UPSTASH_REDIS_REST_URL은 https:// 로 시작하는 REST URL이어야 해요. 메모리 카운터로 대신합니다.");
+    return limiters;
+  }
+  try {
+    const redis = new Redis({ url, token });
+    limiters = {
+      ip: new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(PER_IP, "1 d"), prefix: "youthfit:ip" }),
+      all: new Ratelimit({ redis, limiter: Ratelimit.fixedWindow(GLOBAL, "1 d"), prefix: "youthfit:all" }),
+    };
+  } catch (e) {
+    console.error("[ratelimit] Upstash 연결 설정 실패, 메모리 카운터로 대신합니다:", (e as Error).message);
+  }
+  return limiters;
+}
 
 const mem = new Map<string, { n: number; reset: number }>();
 function memHit(key: string, limit: number) {
@@ -33,9 +52,10 @@ export function clientIp(req: Request) {
 }
 
 export async function checkLimit(ip: string): Promise<{ ok: true } | { ok: false; message: string }> {
-  const ipOk = ipLimiter ? (await ipLimiter.limit(ip)).success : memHit(`ip:${ip}`, PER_IP);
+  const l = getLimiters();
+  const ipOk = l ? (await l.ip.limit(ip)).success : memHit(`ip:${ip}`, PER_IP);
   if (!ipOk) return { ok: false, message: "오늘 이용 가능한 횟수를 모두 썼어요. 내일 다시 이용해주세요." };
-  const allOk = globalLimiter ? (await globalLimiter.limit("all")).success : memHit("all", GLOBAL);
+  const allOk = l ? (await l.all.limit("all")).success : memHit("all", GLOBAL);
   if (!allOk) return { ok: false, message: "오늘 이용자가 많아 잠시 쉬어가요. 내일 다시 이용해주세요." };
   return { ok: true };
 }
