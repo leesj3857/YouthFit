@@ -12,7 +12,7 @@ import {
   STORE_KEY,
   formatAnswer,
 } from "@/lib/chat-flow";
-import type { AnswerValue, ChatReply, ChatState, Question, QuestionKey } from "@/lib/rag/types";
+import type { AnswerValue, ChatReply, ChatState, Question, QuestionKey, Turn } from "@/lib/rag/types";
 import { StreamingText } from "./streaming-text";
 import { QuestionWidget } from "./question-widgets";
 import { Thinking } from "./thinking";
@@ -147,6 +147,11 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   const handle = useCallback(
     ({ state, reply }: ApiOk) => {
       chatState.current = state;
+      if (reply.type === "text") {
+        push({ id: nid(), role: "assistant", kind: "text", text: reply.text, followUps: followUpsFor(rec.current) });
+        setBusy(false);
+        return;
+      }
       if (reply.type === "questions") {
         queue.current = [...reply.questions];
         acc.current = {};
@@ -213,16 +218,22 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     if (text === "조건 바꿔서 다시 찾기") return reset();
     const token = runToken.current;
     setBusy(true);
+    // 대화 전체를 함께 보낸다 (질문과 답, 추천된 항목 이름까지). 길면 서버가 앞부분을 요약한다
+    const history: Turn[] = messages
+      .filter((m): m is Extract<Msg, { role: "user" }> | Extract<Msg, { kind: "text" }> => m.role === "user" || m.kind === "text")
+      .slice(-60)
+      .map((m) => {
+        if (m.role === "user") return { role: "user" as const, text: m.text };
+        const items = m.rec ? [...m.rec.policies, ...m.rec.savings].map((x) => x.name) : [];
+        return { role: "assistant" as const, text: items.length ? `${m.text}\n(추천한 항목: ${items.join(", ")})` : m.text };
+      });
     push({ id: nid(), role: "user", text });
-    const ids = [...(rec.current?.policies ?? []), ...(rec.current?.savings ?? [])].map((x) => x.id);
     const r = await thinkWhile(
       RAG_STEPS_ASK,
-      callApi<{ text: string }>({ action: "ask", state: chatState.current, question: text, ids }),
+      callApi<ApiOk>({ action: "ask", state: chatState.current, question: text, history }),
       token,
     );
-    if (!r) return;
-    push({ id: nid(), role: "assistant", kind: "text", text: r.text, followUps: followUpsFor(rec.current) });
-    setBusy(false);
+    if (r) handle(r);
   }
 
   function send(raw: string) {

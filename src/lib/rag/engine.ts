@@ -1,10 +1,10 @@
 /** 추천 세션 (stateless): 상태는 클라이언트가 보관하고 매 요청에 함께 보낸다.
  *  자연어 → 의도 파싱 → 하이브리드 검색 + 규칙 기반 자격 판정 → 역질문(정보이득) → LLM 순위·이유 */
 import { getPolicy, getSaving, isExpired, POLICIES, SAVINGS } from "./data";
-import { answerQuestion, parseIntent, recommendLLM, type Intent } from "./llm";
+import { answerQuestion, parseFollowUp, parseIntent, recommendLLM, summarizeHistory, type Intent } from "./llm";
 import { applyAnswer, judge, makeQuestion, RESTRICTIVE } from "./profile";
 import { searchPolicies } from "./search";
-import type { AnswerValue, ChatReply, ChatState, Check, PolicyRecord, Profile, Question, QuestionKey, RecPolicy, RecSaving, SavingRecord } from "./types";
+import type { AnswerValue, ChatReply, ChatState, Check, PolicyRecord, Profile, Question, QuestionKey, RecPolicy, RecSaving, SavingRecord, Turn } from "./types";
 
 const MAX_ROUNDS = 2;
 const MAX_Q = 3;
@@ -15,7 +15,7 @@ type Cand = { p: PolicyRecord; status: "pass" | "unknown"; checks: Check[] };
 
 export const emptyProfile = (): Profile => ({ asked: [], skipped: [] });
 
-function mergeIntent(state: ChatState, it: Intent): ChatState {
+function mergeIntent(state: ChatState, it: Intent, replaceTopic = false): ChatState {
   const p: Profile = { ...state.profile };
   if (it.age != null) p.age = it.age;
   if (it.sido) p.sido = it.sido;
@@ -26,12 +26,13 @@ function mergeIntent(state: ChatState, it: Intent): ChatState {
   if (it.housing) { p.housing = it.housing; p.homeless = it.housing !== "own"; }
   if (it.target_groups?.length) p.targetGroups = [...new Set([...(p.targetGroups ?? []), ...it.target_groups])];
   if (it.monthly_saving_manwon != null) p.monthlySaving = it.monthly_saving_manwon;
+  if (it.benefit_types?.length) { p.benefitTypes = it.benefit_types; p.asked = [...new Set([...p.asked, "benefit_type" as const])]; }
   let profile = p;
   if (it.annual_income_manwon != null) profile = { ...applyAnswer(p, "income", it.annual_income_manwon), asked: p.asked };
   return {
     ...state, profile,
-    query: [state.query, it.search_query].filter(Boolean).join(" "),
-    domains: [...new Set([...state.domains, ...(it.domains ?? [])])],
+    query: replaceTopic && it.search_query ? it.search_query : [state.query, it.search_query].filter(Boolean).join(" "),
+    domains: replaceTopic && it.domains?.length ? it.domains : [...new Set([...state.domains, ...(it.domains ?? [])])],
     wantPolicies: state.wantPolicies || it.want_policies,
     wantSavings: state.wantSavings || it.want_savings,
   };
@@ -60,6 +61,7 @@ async function candidates(state: ChatState): Promise<Cand[]> {
   for (const { i } of await searchPolicies(state.query, state.domains)) {
     const p = POLICIES[i];
     if (!p.applicable || isExpired(p)) continue;
+    if (state.profile.benefitTypes?.length && !state.profile.benefitTypes.includes(p.type ?? "기타")) continue;
     const j = judge(p, state.profile);
     if (j.status !== "fail") out.push({ p, status: j.status, checks: j.checks });
   }
@@ -89,11 +91,12 @@ function nextQuestions(cands: Cand[], state: ChatState): Question[] {
     const opts = [...groups].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([g]) => ({ value: g, label: g }));
     return makeQuestion(key, { affects: affects.get(key), widget: { type: "multi", options: [...opts, { value: "none", label: "해당 없음" }] } });
   });
+  if (state.wantPolicies && state.round === 0 && !done.has("benefit_type") && !p.benefitTypes) qs.unshift(makeQuestion("benefit_type"));
   if (state.wantSavings) {
     if (p.age == null && !done.has("age") && !qs.some((q) => q.key === "age")) qs.unshift(makeQuestion("age"));
     if (p.monthlySaving == null && !done.has("monthly") && qs.length < MAX_Q + 1) qs.push(makeQuestion("monthly"));
   }
-  return qs;
+  return qs.slice(0, MAX_Q + 1);   // 한 라운드 최대 4문항
 }
 
 /** 같은 사업이 두 번 등록된 경우(이름이 거의 같음)를 걸러내기 위한 2-gram 유사도 */
@@ -129,7 +132,9 @@ async function step(state: ChatState): Promise<{ state: ChatState; reply: ChatRe
       return { state: s, reply: { type: "questions", intro: intro(s, cands.length), questions: qs, candidateCount: cands.length } };
     }
   }
-  return { state, reply: await recommend(state, cands) };
+  const reply = await recommend(state, cands);
+  const ids = reply.type === "result" ? [...reply.policies, ...reply.savings].map((x) => x.id) : [];
+  return { state: { ...state, shown: [...(state.shown ?? []), ...ids] }, reply };
 }
 
 function eligibleSavings(p: Profile): (SavingRecord & { best: SavingRecord["options"][number] })[] {
@@ -145,15 +150,20 @@ function eligibleSavings(p: Profile): (SavingRecord & { best: SavingRecord["opti
     .slice(0, 8);
 }
 
+/** 직접 받는 혜택(현금·비용 지원)을 정보 제공·행사보다 앞에 — 사용자가 형태를 고르지 않았을 때만 */
+const TYPE_RANK: Record<string, number> = { 현금지원: 0, "비용·바우처지원": 0, "대출·이자지원": 1, "교육·프로그램": 2, "공간·시설": 2, 기타: 3 };
+
 async function recommend(state: ChatState, cands: Cand[]): Promise<ChatReply> {
-  const order = { pass: 0, unknown: 1 };
-  const top = cands.slice(0, TOP_K)
-    .map((c, r) => ({ c, r }))
-    .sort((a, b) => order[a.c.status] - order[b.c.status] || a.c.checks.filter((x) => x.status === "unknown").length - b.c.checks.filter((x) => x.status === "unknown").length || a.r - b.r)
+  const shown = new Set(state.shown ?? []);
+  const chose = !!state.profile.benefitTypes?.length;
+  const top = cands.filter((c) => !shown.has(c.p.id)).slice(0, TOP_K)
+    .map((c, r) => ({ c, score: r + (chose ? 0 : 6 * (TYPE_RANK[c.p.type ?? "기타"] ?? 2))
+      + 4 * c.checks.filter((x) => x.status === "unknown").length + (c.status === "unknown" ? 4 : 0) }))
+    .sort((a, b) => a.score - b.score)
     .map(({ c }) => c)
     .filter((c, i, arr) => !arr.slice(0, i).some((d) => similar(d.p.name, c.p.name)))
     .slice(0, 12);
-  const savs = state.wantSavings ? eligibleSavings(state.profile) : [];
+  const savs = state.wantSavings ? eligibleSavings(state.profile).filter((x) => !shown.has(x.id)) : [];
   const cards = [
     ...top.map((c) => ({ id: c.p.id, kind: "정책", name: c.p.name, org: c.p.org, benefit: c.p.benefit, status: c.status,
       conditions: c.checks.map((x) => `${x.text}:${x.status}`), extra_requirements: c.p.extra.slice(0, 5), exclusions: c.p.exclusions.slice(0, 4),
@@ -162,12 +172,16 @@ async function recommend(state: ChatState, cands: Cand[]): Promise<ChatReply> {
       rate: `${s.best.term}개월 최고 ${s.best.max}% (기본 ${s.best.base}%)`, join_member: s.joinMember.slice(0, 120),
       special_condition: (s.special ?? "").slice(0, 300), max_limit_won: s.maxLimit })),
   ];
-  if (!cards.length) return { type: "result", summary: "지금 조건으로는 맞는 결과를 찾지 못했어요. 조건을 바꿔서 다시 찾아볼까요?", policies: [], savings: [], candidateCount: 0 };
+  if (!cards.length)
+    return shown.size
+      ? { type: "text", text: "지금 조건으로는 더 보여드릴 만한 결과가 없어요. 혜택 형태나 분야를 바꿔서 찾아볼까요? 예: \"교육·상담 프로그램도 보여줘\", \"주거 말고 취업 쪽으로\"" }
+      : { type: "result", summary: "지금 조건으로는 맞는 결과를 찾지 못했어요. 조건을 바꿔서 다시 찾아볼까요?", policies: [], savings: [], candidateCount: 0 };
 
   const userView = { ...state.profile, asked: undefined, skipped: undefined };
   let rec;
   try {
-    rec = await recommendLLM({ 요청: state.query, 사용자: userView, 후보: cards });
+    const before = [...shown].map((id) => getPolicy(id)?.name ?? getSaving(id)?.name).filter(Boolean).slice(-12);
+    rec = await recommendLLM({ 요청: state.query, 사용자: userView, 이미_보여준_항목: before, 후보: cards });
   } catch {
     rec = { summary: `**${profileLine(state.profile) || "입력하신 조건"}** 기준으로 자격 조건을 대조해 골랐어요.`,
       policies: top.slice(0, 6).map((c) => ({ id: c.p.id, reason: "입력하신 조건에 맞는 후보예요.", caution: null })), savings: [] };
@@ -196,8 +210,38 @@ async function recommend(state: ChatState, cands: Cand[]): Promise<ChatReply> {
   return { type: "result", summary: rec.summary, policies, savings, candidateCount: cands.length, monthly: state.profile.monthlySaving };
 }
 
-/** 추천 이후 자유 질문: 추천된 항목들의 원문을 근거로 답변 */
-export async function ask(state: ChatState, question: string, ids: string[]) {
+const line = (t: Turn) => `${t.role === "user" ? "사용자" : "청핏"}: ${t.text}`;
+const FULL_LIMIT = 12_000;   // 이 길이(글자)까지는 대화 전체를 그대로 넘긴다
+const KEEP_RECENT = 12;      // 넘으면 최근 12개 메시지만 그대로, 그 앞은 요약
+
+/** 대화 전체를 맥락으로 쓴다. 길어지면 앞부분만 요약해 비용을 일정하게 유지 */
+async function historyText(h: Turn[]) {
+  const full = h.map(line).join("\n");
+  if (full.length <= FULL_LIMIT) return full;
+  const old = h.slice(0, -KEEP_RECENT).map(line).join("\n");
+  const recent = h.slice(-KEEP_RECENT).map(line).join("\n");
+  try {
+    return `[이전 대화 요약]\n${await summarizeHistory(old.slice(-30_000))}\n\n[최근 대화]\n${recent}`;
+  } catch {
+    return `[최근 대화]\n${recent}`;
+  }
+}
+
+/** 추천 이후 대화: 더 보기 / 조건 바꿔 다시 찾기 / 추천 항목 질문 — 직전 대화를 함께 보고 판단 */
+export async function followUp(state: ChatState, text: string, history: Turn[] = []): Promise<{ state: ChatState; reply: ChatReply }> {
+  const h = await historyText(history);
+  const f = await parseFollowUp(h, text);
+  if (f.intent === "more") return step({ ...state, round: MAX_ROUNDS });
+  if (f.intent === "refine") {
+    const s = mergeIntent(state, f, true);
+    return step({ ...s, shown: [], round: Math.max(state.round, MAX_ROUNDS - 1) });
+  }
+  return { state, reply: { type: "text", text: await ask(state, text, h) } };
+}
+
+/** 추천된 항목들의 공고 원문을 근거로 답변 */
+async function ask(state: ChatState, question: string, history: string) {
+  const ids = (state.shown ?? []).slice(-12);
   const docs = ids.map((id) => {
     const p = getPolicy(id);
     if (p) return { 종류: "정책", 이름: p.name, 기관: p.org, 요약: p.summary, 혜택: p.benefit, 신청기간: [p.applyStart, p.applyEnd],
@@ -208,5 +252,5 @@ export async function ask(state: ChatState, question: string, ids: string[]) {
       유의사항: s.note, 월한도_원: s.maxLimit, 금리: s.options };
     return null;
   }).filter(Boolean);
-  return answerQuestion(question, { ...state.profile, asked: undefined, skipped: undefined }, docs);
+  return answerQuestion(question, { ...state.profile, asked: undefined, skipped: undefined }, docs, history);
 }

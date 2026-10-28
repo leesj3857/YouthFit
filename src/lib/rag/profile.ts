@@ -44,6 +44,16 @@ export const QUESTIONS: Record<QuestionKey, Omit<Question, "key">> = {
   },
   household_head: { text: "주민등록상 세대주이신가요?", widget: { type: "confirm", yes: "네, 세대주예요", no: "아니요" } },
   target_group: { text: "해당하는 게 있으면 모두 골라주세요.", widget: { type: "multi", options: [] } },
+  benefit_type: {
+    text: "어떤 형태의 혜택을 찾으세요? 여러 개 골라도 돼요.",
+    widget: { type: "multi", options: [
+      opt("현금지원", "현금 지원금", "수당·장려금·활동비"),
+      opt("비용·바우처지원", "비용 지원·바우처", "월세·응시료·교육비 등"),
+      opt("대출·이자지원", "저금리 대출·이자 지원"),
+      opt("교육·프로그램", "교육·상담·취업 프로그램"),
+      opt("공간·시설", "공간·주거시설 이용"),
+      opt("any", "상관없어요")] },
+  },
   monthly: { text: "한 달에 저축할 수 있는 금액은 어느 정도예요?", widget: { type: "slider", min: 0, max: 100, step: 5, defaultValue: 30, unit: "manwon", presets: [10, 30, 50, 70] } },
 };
 
@@ -75,6 +85,7 @@ export function applyAnswer(p: Profile, key: QuestionKey, v: AnswerValue | null)
     case "household_head": n.householdHead = Boolean(v); break;
     case "target_group": n.targetGroups = (v as string[]).filter((g) => g !== "none"); break;
     case "monthly": n.monthlySaving = Number(v); break;
+    case "benefit_type": n.benefitTypes = (v as string[]).filter((x) => x !== "any"); break;
   }
   return n;
 }

@@ -11,7 +11,7 @@ export type Widget =
 
 export type QuestionKey =
   | "age" | "region" | "sigungu" | "employment" | "education" | "income" | "assets"
-  | "marital" | "housing" | "household_head" | "target_group" | "monthly";
+  | "marital" | "housing" | "household_head" | "target_group" | "monthly" | "benefit_type";
 
 export interface Question {
   key: QuestionKey;
@@ -39,6 +39,8 @@ export interface Profile {
   householdHead?: boolean;
   targetGroups?: string[];
   monthlySaving?: number;    // 만원
+  /** 원하는 혜택 형태 (비어 있으면 전부) — 현금지원·비용·바우처지원·대출·이자지원·교육·프로그램·공간·시설 */
+  benefitTypes?: string[];
   asked: QuestionKey[];
   skipped: QuestionKey[];
 }
@@ -50,6 +52,8 @@ export interface ChatState {
   wantPolicies: boolean;
   wantSavings: boolean;
   round: number;
+  /** 이미 보여준 추천 항목 id ("다른 건 없어?"에서 제외) */
+  shown?: string[];
 }
 
 export type CheckStatus = "pass" | "unknown" | "fail";
@@ -70,7 +74,11 @@ export interface RecSaving {
 
 export type ChatReply =
   | { type: "questions"; intro: string; questions: Question[]; candidateCount: number }
-  | { type: "result"; summary: string; policies: RecPolicy[]; savings: RecSaving[]; candidateCount: number; monthly?: number };
+  | { type: "result"; summary: string; policies: RecPolicy[]; savings: RecSaving[]; candidateCount: number; monthly?: number }
+  | { type: "text"; text: string };
+
+/** 추천 이후 자유 대화 기록 (최근 몇 턴만 서버로 보냄) */
+export interface Turn { role: "user" | "assistant"; text: string }
 
 /* ---------- 데이터 (export_web.py 출력) ---------- */
 export interface PolicyRecord {
