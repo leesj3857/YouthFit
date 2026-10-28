@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { answer, ask, start } from "@/lib/rag/engine";
 import { warmup } from "@/lib/rag/search";
+import { checkLimit, clientIp } from "@/lib/ratelimit";
 import type { AnswerValue, ChatState, QuestionKey } from "@/lib/rag/types";
 
 export const runtime = "nodejs";
@@ -17,6 +18,8 @@ export async function POST(req: Request) {
   if (!process.env.ANTHROPIC_API_KEY) {
     return NextResponse.json({ error: "서버에 ANTHROPIC_API_KEY가 설정되지 않았어요." }, { status: 500 });
   }
+  const limit = await checkLimit(clientIp(req));
+  if (!limit.ok) return NextResponse.json({ error: limit.message }, { status: 429 });
   let body: Body;
   try {
     body = await req.json();
