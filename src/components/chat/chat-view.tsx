@@ -4,25 +4,19 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Keyb
 import Link from "next/link";
 import { ArrowUp, RotateCcw } from "lucide-react";
 import {
+  FOLLOW_UPS,
+  RAG_STEPS_ASK,
   RAG_STEPS_FINAL,
-  STORE_KEY,
   RAG_STEPS_INTRO,
-  followUpReply,
+  RAG_STEPS_NEXT,
+  STORE_KEY,
   formatAnswer,
-  nextQuestion,
-  parseQuery,
-  recommend,
-  summaryText,
-  type AnswerKey,
-  type Answers,
-  type Question,
-  type Recommendation,
 } from "@/lib/chat-flow";
-import { INTEREST_LABEL, type Interest } from "@/lib/catalog";
+import type { AnswerValue, ChatReply, ChatState, Question, QuestionKey } from "@/lib/rag/types";
 import { StreamingText } from "./streaming-text";
-import { QuestionWidget, type AnswerValue } from "./question-widgets";
+import { QuestionWidget } from "./question-widgets";
 import { Thinking } from "./thinking";
-import { RecommendationView } from "./recommendation";
+import { RecommendationView, type ResultReply } from "./recommendation";
 import { cn } from "@/lib/utils";
 
 /* ---------- 메시지 모델 ---------- */
@@ -37,7 +31,7 @@ type Msg = (
       text: string;
       question?: Question;
       answered?: boolean;
-      rec?: Recommendation;
+      rec?: ResultReply;
       followUps?: string[];
     }
 ) & {
@@ -45,7 +39,15 @@ type Msg = (
   restored?: boolean;
 };
 
-type Snapshot = { query?: string; messages: Msg[]; answers: Answers; hinted: Answers; asked: AnswerKey[]; rec: Recommendation | null };
+type Answers = Partial<Record<QuestionKey, AnswerValue | null>>;
+type Snapshot = {
+  query?: string;
+  messages: Msg[];
+  state: ChatState | null;
+  queue: Question[];
+  acc: Answers;
+  rec: ResultReply | null;
+};
 
 const isThinking = (m?: Msg) => m?.role === "assistant" && m.kind === "thinking";
 
@@ -54,19 +56,21 @@ const nid = () => `m${Date.now().toString(36)}${seq++}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const SUGGESTIONS = [
-  "서울 사는 취준생인데 받을 수 있는 지원금이랑 적금 알려줘",
+  "서울 사는 26살 취준생인데 받을 수 있는 지원금이랑 적금 알려줘",
   "자취 중인데 월세 지원 받을 수 있을까?",
   "사회초년생인데 목돈 모으기 좋은 적금 추천해줘",
-  "자격증 공부하는데 교육비 지원되는 거 있어?",
+  "광주 사는 대학생인데 자격증 응시료 지원되는 거 있어?",
 ];
 
 const ACKS = ["알겠어요.", "좋아요.", "확인했어요.", "네, 반영할게요."];
 
-const FOLLOW_UPS = ["1순위 정책 신청 방법 알려줘", "적금 금리 더 자세히 비교해줘", "조건 바꿔서 다시 찾기"];
+type ApiOk = { state: ChatState; reply: ChatReply };
 
-function interestPhrase(a: Answers) {
-  if (!a.interests?.length) return "받을 수 있는 혜택을";
-  return `${a.interests.map((i: Interest) => INTEREST_LABEL[i]).join(", ")} 관련 혜택을`;
+async function callApi<T>(body: object): Promise<T> {
+  const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string }).error ?? "잠시 후 다시 시도해주세요.");
+  return data as T;
 }
 
 /* ---------- 컴포넌트 ---------- */
@@ -77,11 +81,11 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   const [busy, setBusy] = useState(false);
 
   // 비동기 흐름에서 최신 값을 읽기 위한 ref들
-  const answers = useRef<Answers>({});
-  const hinted = useRef<Answers>({});
-  const asked = useRef(new Set<AnswerKey>());
+  const chatState = useRef<ChatState | null>(null);
+  const queue = useRef<Question[]>([]);
+  const acc = useRef<Answers>({});
   const pendingId = useRef<string | null>(null);
-  const rec = useRef<Recommendation | null>(null);
+  const rec = useRef<ResultReply | null>(null);
   const runToken = useRef(0);
   const startedOnce = useRef(false);
   const firstQuery = useRef<string | undefined>(undefined);
@@ -94,46 +98,75 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   const patch = (id: string, p: Partial<Msg>) =>
     setMessages((ms) => ms.map((m) => (m.id === id ? ({ ...m, ...p } as Msg) : m)));
 
-  /* ----- 대화 엔진 ----- */
+  /* ----- 대화 엔진: 검색 단계 표시를 서버 응답과 함께 진행 ----- */
 
-  const think = useCallback(async (steps: string[], token: number) => {
+  /** 단계를 하나씩 켜되, 서버 응답이 올 때까지 마지막 단계에서 기다린다 */
+  const thinkWhile = useCallback(async <T,>(steps: string[], work: Promise<T>, token: number): Promise<T | null> => {
     const id = nid();
     push({ id, role: "assistant", kind: "thinking", steps, active: 0, done: false });
-    for (let i = 1; i <= steps.length; i++) {
-      await sleep(650 + Math.random() * 450);
-      if (token !== runToken.current) return false;
+    let settled = false;
+    const guarded = work.finally(() => { settled = true; });
+    guarded.catch(() => {}); // 실패는 아래에서 처리 — 대기 중 미처리 거부 경고 방지
+    for (let i = 1; i < steps.length; i++) {
+      await sleep(600 + Math.random() * 400);
+      if (token !== runToken.current) return null;
       patch(id, { active: i });
     }
+    let result: T;
+    try {
+      result = await guarded;
+    } catch (e) {
+      if (token !== runToken.current) return null;
+      patch(id, { active: steps.length, done: true });
+      await sleep(420);
+      push({ id: nid(), role: "assistant", kind: "text", text: `앗, ${(e as Error).message}`, followUps: ["조건 바꿔서 다시 찾기"] });
+      setBusy(false);
+      return null;
+    }
+    if (!settled || token !== runToken.current) return null;
+    patch(id, { active: steps.length });
     await sleep(250);
-    if (token !== runToken.current) return false;
     patch(id, { done: true });
     // 단계 목록이 다 접힌 다음에 답변이 시작되도록 (접히는 중에 글자가 올라붙으면 화면이 출렁임)
     await sleep(420);
-    return token === runToken.current;
+    return token === runToken.current ? result : null;
   }, []);
 
-  const finish = useCallback(
-    async (token: number) => {
-      if (!(await think(RAG_STEPS_FINAL, token))) return;
-      const r = recommend(answers.current);
-      rec.current = r;
-      push({ id: nid(), role: "assistant", kind: "text", text: summaryText(answers.current, r), rec: r, followUps: FOLLOW_UPS });
+  const askFromQueue = useCallback((prefix: string) => {
+    const q = queue.current.shift();
+    if (!q) return false;
+    const id = nid();
+    pendingId.current = id;
+    const text = !prefix ? q.text : prefix.endsWith("\n") ? prefix + q.text : `${prefix} ${q.text}`;
+    push({ id, role: "assistant", kind: "text", text, question: q });
+    setBusy(false);
+    return true;
+  }, []);
+
+  const handle = useCallback(
+    ({ state, reply }: ApiOk) => {
+      chatState.current = state;
+      if (reply.type === "questions") {
+        queue.current = [...reply.questions];
+        acc.current = {};
+        askFromQueue(`${reply.intro}\n\n`);
+        return;
+      }
+      rec.current = reply;
+      push({ id: nid(), role: "assistant", kind: "text", text: reply.summary, rec: reply, followUps: FOLLOW_UPS });
       setBusy(false);
     },
-    [think],
+    [askFromQueue],
   );
 
-  const askNext = useCallback(
-    async (prefix: string, token: number) => {
-      const q = nextQuestion(answers.current, asked.current, hinted.current);
-      if (!q) return finish(token);
-      const id = nid();
-      pendingId.current = id;
-      const text = !prefix ? q.text : prefix.endsWith("\n") ? prefix + q.text : `${prefix} ${q.text}`;
-      push({ id, role: "assistant", kind: "text", text, question: q });
-      setBusy(false);
+  const submit = useCallback(
+    async (token: number, text?: string) => {
+      const work = callApi<ApiOk>({ action: "answer", state: chatState.current, answers: acc.current, text });
+      const steps = (chatState.current?.round ?? 0) >= 2 ? RAG_STEPS_FINAL : RAG_STEPS_NEXT;
+      const r = await thinkWhile(steps, work, token);
+      if (r) handle(r);
     },
-    [finish],
+    [thinkWhile, handle],
   );
 
   const start = useCallback(
@@ -142,43 +175,11 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       setBusy(true);
       push({ id: nid(), role: "user", text: query });
       firstQuery.current = query;
-      hinted.current = parseQuery(query);
-      answers.current = { ...hinted.current };
-      if (!(await think(RAG_STEPS_INTRO, token))) return;
-      const known = [hinted.current.region && `${hinted.current.region}에 사시는`, hinted.current.age && `만 ${hinted.current.age}세`]
-        .filter(Boolean)
-        .join(" ");
-      const intro = `${known ? `${known} 분께 맞는 ` : ""}${interestPhrase(hinted.current)} 찾아드릴게요. 정확하게 추천하려면 몇 가지만 더 여쭤볼게요.\n\n`;
-      await askNext(intro, token);
+      const r = await thinkWhile(RAG_STEPS_INTRO, callApi<ApiOk>({ action: "start", text: query }), token);
+      if (r) handle(r);
     },
-    [think, askNext],
+    [thinkWhile, handle],
   );
-
-  function applyAnswer(q: Question, value: AnswerValue | null) {
-    asked.current.add(q.key);
-    if (value === null) return;
-    const a = answers.current;
-    switch (q.key) {
-      case "status":
-        a.status = value as Answers["status"];
-        break;
-      case "age":
-        a.age = Number(value);
-        break;
-      case "region":
-        a.region = value as Answers["region"];
-        break;
-      case "interests":
-        a.interests = value as Interest[];
-        break;
-      case "independent":
-        a.independent = Boolean(value);
-        break;
-      case "monthly":
-        a.monthly = Number(value);
-        break;
-    }
-  }
 
   async function answer(msgId: string, q: Question, value: AnswerValue | null) {
     if (pendingId.current !== msgId) return;
@@ -187,28 +188,22 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     setBusy(true);
     patch(msgId, { answered: true });
     push({ id: nid(), role: "user", text: value === null ? "잘 모르겠어요" : formatAnswer(q, value) });
-    applyAnswer(q, value);
-    await sleep(500);
+    acc.current[q.key] = value;
+    await sleep(450);
     if (token !== runToken.current) return;
-    await askNext(ACKS[asked.current.size % ACKS.length], token);
+    if (!askFromQueue(ACKS[Object.keys(acc.current).length % ACKS.length])) await submit(token);
   }
 
-  /** 질문이 떠 있는 상태에서 직접 입력한 경우: 문장에서 뽑을 수 있는 정보만 반영하고 다음으로 */
+  /** 질문이 떠 있는 상태에서 직접 입력한 경우: 서버가 문장을 해석해 반영하고 필요한 것만 다시 묻는다 */
   async function freeAnswer(text: string) {
     const id = pendingId.current!;
-    const q = messages.find((m): m is Extract<Msg, { kind: "text" }> => m.id === id && m.role === "assistant" && m.kind === "text")?.question;
     pendingId.current = null;
+    queue.current = [];
     const token = runToken.current;
     setBusy(true);
     patch(id, { answered: true });
     push({ id: nid(), role: "user", text });
-    Object.assign(answers.current, parseQuery(text));
-    const num = text.match(/\d+/);
-    if (q?.widget.type === "slider" && num) applyAnswer(q, Number(num[0]));
-    else if (q) asked.current.add(q.key);
-    await sleep(500);
-    if (token !== runToken.current) return;
-    await askNext("말씀하신 내용 반영했어요.", token);
+    await submit(token, text);
   }
 
   async function followUp(text: string) {
@@ -216,8 +211,14 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     const token = runToken.current;
     setBusy(true);
     push({ id: nid(), role: "user", text });
-    if (!(await think(["추천 결과 다시 살펴보기", "답변 정리"], token))) return;
-    push({ id: nid(), role: "assistant", kind: "text", text: followUpReply(text, rec.current), followUps: FOLLOW_UPS });
+    const ids = [...(rec.current?.policies ?? []), ...(rec.current?.savings ?? [])].map((x) => x.id);
+    const r = await thinkWhile(
+      RAG_STEPS_ASK,
+      callApi<{ text: string }>({ action: "ask", state: chatState.current, question: text, ids }),
+      token,
+    );
+    if (!r) return;
+    push({ id: nid(), role: "assistant", kind: "text", text: r.text, followUps: FOLLOW_UPS });
     setBusy(false);
   }
 
@@ -227,14 +228,18 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     setInput("");
     if (messages.length === 0) start(text);
     else if (pendingId.current) freeAnswer(text);
-    else followUp(text);
+    else if (rec.current) followUp(text);
+    else {
+      reset();
+      setTimeout(() => start(text), 0);
+    }
   }
 
   function reset() {
     runToken.current++;
-    answers.current = {};
-    hinted.current = {};
-    asked.current = new Set();
+    chatState.current = null;
+    queue.current = [];
+    acc.current = {};
     pendingId.current = null;
     rec.current = null;
     firstQuery.current = undefined;
@@ -257,15 +262,15 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     }
     // ?q= 없이 들어왔거나, 같은 질문으로 시작한 대화에서 뒤로 가기로 돌아온 경우엔 복원
     if (snap && (!initialQuery || snap.query === initialQuery)) {
-      answers.current = snap.answers;
-      hinted.current = snap.hinted;
-      asked.current = new Set(snap.asked);
+      chatState.current = snap.state;
+      queue.current = snap.queue;
+      acc.current = snap.acc;
       rec.current = snap.rec;
       firstQuery.current = snap.query;
       const last = snap.messages.at(-1);
       if (last?.role === "assistant" && last.kind === "text" && last.question && !last.answered) pendingId.current = last.id;
       // sessionStorage는 서버 렌더링 중엔 읽을 수 없어서 마운트 직후 한 번만 복원한다
-      setMessages(snap.messages.map((m) => ({ ...m, restored: true })));
+      setMessages(snap.messages.filter((m) => !(m.role === "assistant" && m.kind === "thinking" && !m.done)).map((m) => ({ ...m, restored: true })));
       return;
     }
     if (initialQuery) start(initialQuery);
@@ -280,9 +285,9 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
         const snap: Snapshot = {
           query: firstQuery.current,
           messages,
-          answers: answers.current,
-          hinted: hinted.current,
-          asked: [...asked.current],
+          state: chatState.current,
+          queue: queue.current,
+          acc: acc.current,
           rec: rec.current,
         };
         sessionStorage.setItem(STORE_KEY, JSON.stringify(snap));

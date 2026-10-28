@@ -6,7 +6,7 @@ LLM 기반 역질문 대화로 완성하는 청년 정책·금융상품 통합 �
 
 ```bash
 pnpm install
-cp .env.example .env.local   # YOUTHCENTER_API_KEY 입력
+cp .env.example .env.local   # YOUTHCENTER_API_KEY, ANTHROPIC_API_KEY 입력
 pnpm dev
 ```
 
@@ -20,7 +20,12 @@ src/
 │   ├── policies/[id]/page.tsx    # 추천 정책 상세
 │   ├── products/[id]/page.tsx    # 추천 예적금 상세 + 만기 계산기
 │   ├── layout.tsx                # Pretendard 폰트, 메타데이터
-│   └── api/policies/route.ts     # GET /api/policies — 채팅에서 호출하는 서버 라우트
+│   ├── api/chat/route.ts         # POST /api/chat — RAG 역질문 추천 (start / answer / ask)
+│   └── api/policies/route.ts     # GET /api/policies — 온통청년 실시간 조회
+├── data/                         # youthfit-enrich/export_web.py 가 만든 정형화 데이터
+│   ├── policies.json             # 정책 1,687건 (자격 조건 + 원문 근거)
+│   ├── savings.json              # 금감원 적금 337개 + 기간별 금리
+│   └── policies.emb              # 정책 임베딩 (scripts/build-embeddings.mjs)
 ├── components/
 │   ├── chat/chat-composer.tsx    # 홈 입력창 (/chat 으로 이동)
 │   ├── chat/chat-view.tsx        # 대화 엔진 + 메시지 렌더 (sessionStorage로 대화 복원)
@@ -37,8 +42,15 @@ src/
 └── lib/
     ├── youthcenter.ts            # server-only: fetchPolicies()
     ├── policy.ts                 # 타입 + 표시용 헬퍼 (client/server 공용)
-    ├── chat-flow.ts              # 질문 스키마·시나리오·추천 매칭 (LLM 연동 시 교체)
-    └── catalog.ts                # 추천용 정책/예적금 샘플 데이터
+    ├── chat-flow.ts              # 답변 표시·검색 단계 문구 (UI 헬퍼)
+    ├── format.ts                 # 금액·날짜·만기 계산
+    └── rag/                      # 서버: 추천 엔진
+        ├── types.ts              # Question·ChatState·추천 결과 타입 (프론트 공용)
+        ├── data.ts               # 데이터·임베딩 로드
+        ├── search.ts             # BM25 + 임베딩 하이브리드 검색
+        ├── profile.ts            # 역질문 템플릿·응답 반영·자격 판정(규칙)
+        ├── llm.ts                # Claude: 의도 파싱·추천 이유·추천 후 질문 답변
+        └── engine.ts             # start / answer / ask
 ```
 
 ## 온통청년 API 메모
@@ -50,12 +62,35 @@ src/
 - 연령: `sprtTrgtAgeLmtYn=N`일 때만 `sprtTrgtMinAge/MaxAge` 유효
 - 상세 페이지: `https://www.youthcenter.go.kr/youthPolicy/ythPlcyTotalSearch/ythPlcyDetail/{plcyNo}`
 
+## AI 추천 구조
+
+```
+"서울 사는 26살 취준생인데 월세 지원이랑 적금 추천해줘"
+ ① 의도 파싱 (Claude Haiku 5.5) — 나이·지역·취업상태·관심 분야·검색어
+ ② 하이브리드 검색 — BM25(한글 2-gram) + 의미 검색(multilingual-e5-small, 서버에서 로컬 실행) → RRF
+ ③ 자격 판정 — LLM이 아닌 규칙(profile.ts). 조건별 충족/불가/확인 필요, '불가'는 제외
+ ④ 역질문 — 상위 40개 후보에서 '확인 필요'를 가장 많이 만드는 항목부터 최대 3문항 × 2라운드
+    (시·군·구, 대상 집단 질문의 선택지는 후보 데이터에서 동적으로 만듦)
+ ⑤ 추천 (Claude Sonnet 5.5) — 판정이 끝난 후보 중 순위·이유·주의사항. 후보에 없는 id는 버림
+ ⑥ 추천 후 질문 — 추천된 정책·적금의 공고 원문을 근거로 답변
+```
+
+- 상태(프로필·검색어·라운드)는 클라이언트가 들고 매 요청에 보냄 → 서버 세션 저장소 없이 Vercel에서 동작
+- 질문은 `Question` 스키마(`question-widgets.tsx`가 렌더)로 내려옴
+- 한 번 추천받는 데 API 비용 약 $0.03
+
+### 데이터 갱신
+`~/dev/youthfit-enrich` (Python)에서 정형화한 결과를 내보낸다.
+```bash
+python export_web.py ~/Desktop/youthfit/src/data    # DB(읽기 전용) + 정형화 결과 → JSON
+cd ~/Desktop/youthfit && node scripts/build-embeddings.mjs
+npx tsx scripts/scenarios.mts                       # 페르소나 5개로 '자격 불가 정책 추천' 여부 검사
+```
+
 ## 아직 없는 것
 
-- LLM 역질문 생성 — 현재는 `chat-flow.ts`의 규칙 기반 시나리오. 백엔드가 `Question` 스키마(JSON)로 다음 질문을 내려주면 프론트는 그대로 렌더
-- 추천 데이터 — `catalog.ts` 샘플. RAG 결과로 교체 예정
-- 금융감독원 금융상품한눈에 API — 헤더 "금융상품" 메뉴는 준비중
-- FastAPI 백엔드 연동 — 지금은 Next.js Route Handler가 대신 호출
+- 금융감독원 정기예금 — 적금만 수집 중
+- 온통청년 데이터 자동 갱신 — 지금은 수동 (위 '데이터 갱신')
 
 ## 상세 패널 (`policy-detail.tsx`)
 

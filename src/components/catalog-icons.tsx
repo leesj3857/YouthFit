@@ -1,5 +1,5 @@
 import { Briefcase, Bus, GraduationCap, Home, PiggyBank } from "lucide-react";
-import type { Interest } from "@/lib/catalog";
+import type { Interest } from "@/lib/rag/types";
 import { cn } from "@/lib/utils";
 
 const INTEREST_ICON = {
