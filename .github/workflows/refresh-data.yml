@@ -37,8 +37,9 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: 검색 임베딩 다시 만들기
-        run: node scripts/build-embeddings.mjs
+      - name: 검색 임베딩 다시 만들기 (정책 데이터가 바뀐 날만)
+        run: |
+         if git diff --quiet -- src/data/policies.json; then echo "정책 데이터 변경 없음"; else node scripts/build-embeddings.mjs; fi
 
       - name: 바뀐 데이터 커밋 (Vercel이 자동 재배포)
         run: |
