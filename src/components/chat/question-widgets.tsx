@@ -207,7 +207,7 @@ function SliderInput({
                 value === p ? "bg-brand-soft text-brand" : "bg-grey-100 text-grey-600 hover:bg-grey-200",
               )}
             >
-              {p}만원
+              {widget.unit === "age" ? `${p}세` : `${p}만원`}
             </button>
           ))}
         </div>
