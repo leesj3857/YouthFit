@@ -183,6 +183,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       setBusy(true);
       push({ id: nid(), role: "user", text: query });
       firstQuery.current = query;
+      syncUrl(query);
       const r = await thinkWhile(RAG_STEPS_INTRO, callApi<ApiOk>({ action: "start", text: query }), token);
       if (r) handle(r);
     },
@@ -260,6 +261,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     setMessages([]);
     setBusy(false);
     setInput("");
+    syncUrl();
     window.scrollTo({ top: 0 });
   }
 
@@ -274,8 +276,12 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     } catch {
       // 저장소 접근 불가(시크릿 모드 등) — 새 대화로 시작
     }
-    // ?q= 없이 들어왔거나, 같은 질문으로 시작한 대화에서 뒤로 가기로 돌아온 경우엔 복원
-    if (snap && (!initialQuery || snap.query === initialQuery)) {
+    // 상세 페이지에서 돌아왔거나(상단 뒤로가기·브라우저 뒤로가기 모두), ?q= 없이 들어왔거나, 같은 질문이면 이전 대화를 복원
+    const returning = readSession(RETURN_KEY) === "1";
+    try {
+      sessionStorage.removeItem(RETURN_KEY);
+    } catch {}
+    if (snap && (returning || !initialQuery || snap.query === initialQuery)) {
       chatState.current = snap.state;
       queue.current = snap.queue;
       acc.current = snap.acc;
@@ -360,6 +366,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       if (!(e.target instanceof Element) || !e.target.closest("a[href]")) return;
       try {
         sessionStorage.setItem(SCROLL_KEY, String(Math.round(window.scrollY)));
+        sessionStorage.setItem(RETURN_KEY, "1");
       } catch {
         // 저장 실패는 무시
       }
@@ -624,6 +631,14 @@ function groupTurns(messages: Msg[]) {
 }
 
 const SCROLL_KEY = `${STORE_KEY}:scroll`;
+/** 대화 화면에서 링크로 나갔다는 표시 — 돌아오면 무조건 대화를 복원 */
+const RETURN_KEY = `${STORE_KEY}:return`;
+
+/** 주소창의 ?q= 를 지금 대화의 첫 질문과 맞춘다 (Next 라우팅 없이 history만 교체) */
+function syncUrl(query?: string) {
+  const url = query ? `/chat?q=${encodeURIComponent(query)}` : "/chat";
+  if (window.location.pathname + window.location.search !== url) window.history.replaceState(window.history.state, "", url);
+}
 
 function readSession(key: string) {
   try {
