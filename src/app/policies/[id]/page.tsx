@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { Check, X } from "lucide-react";
-import { getPolicy } from "@/lib/rag/data";
+import { getPolicy, isExpired } from "@/lib/rag/data";
 import type { PolicyRecord } from "@/lib/rag/types";
 import { daysLeft, formatDate, formatManwon } from "@/lib/format";
 import { InterestIcon } from "@/components/catalog-icons";
@@ -51,7 +51,7 @@ export default async function PolicyPage(props: PageProps<"/policies/[id]">) {
   if (!p) notFound();
   const conds = conditions(p);
   const d = daysLeft(p.applyEnd);
-  const badge = p.expired
+  const badge = isExpired(p)
     ? { t: "마감", c: "bg-grey-100 text-grey-500" }
     : p.alwaysOpen
       ? { t: "상시", c: "bg-grey-100 text-grey-600" }

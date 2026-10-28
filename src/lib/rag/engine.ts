@@ -1,6 +1,6 @@
 /** 추천 세션 (stateless): 상태는 클라이언트가 보관하고 매 요청에 함께 보낸다.
  *  자연어 → 의도 파싱 → 하이브리드 검색 + 규칙 기반 자격 판정 → 역질문(정보이득) → LLM 순위·이유 */
-import { getPolicy, getSaving, POLICIES, SAVINGS } from "./data";
+import { getPolicy, getSaving, isExpired, POLICIES, SAVINGS } from "./data";
 import { answerQuestion, parseIntent, recommendLLM, type Intent } from "./llm";
 import { applyAnswer, judge, makeQuestion, RESTRICTIVE } from "./profile";
 import { searchPolicies } from "./search";
@@ -59,7 +59,7 @@ async function candidates(state: ChatState): Promise<Cand[]> {
   const out: Cand[] = [];
   for (const { i } of await searchPolicies(state.query, state.domains)) {
     const p = POLICIES[i];
-    if (!p.applicable || p.expired) continue;
+    if (!p.applicable || isExpired(p)) continue;
     const j = judge(p, state.profile);
     if (j.status !== "fail") out.push({ p, status: j.status, checks: j.checks });
   }
