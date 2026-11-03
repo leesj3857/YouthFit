@@ -25,7 +25,7 @@ src/
 ├── data/                         # youthfit-enrich/export_web.py 가 만든 정형화 데이터
 │   ├── policies.json             # 정책 1,687건 (자격 조건 + 원문 근거)
 │   ├── savings.json              # 금감원 적금 337개 + 기간별 금리
-│   ├── policies.emb              # 정책 임베딩 512차원 (scripts/build-embeddings.mjs, Voyage AI)
+│   ├── policies.emb              # 정책 임베딩 512차원 (scripts/build-embeddings.mjs, BAZE gemini-embedding-2)
 │   └── policies.emb.json         # 임베딩 모델 정보
 ├── components/
 │   ├── chat/chat-composer.tsx    # 홈 입력창 (/chat 으로 이동)
@@ -68,7 +68,7 @@ src/
 ```
 "서울 사는 26살 취준생인데 월세 지원이랑 적금 추천해줘"
  ① 의도 파싱 (Claude Haiku 5.5) — 나이·지역·취업상태·관심 분야·검색어
- ② 하이브리드 검색 — BM25(한글 2-gram) + 의미 검색(Voyage AI voyage-4-lite, 질문만 API로 임베딩) → RRF
+ ② 하이브리드 검색 — BM25(한글 2-gram) + 의미 검색(BAZE Gateway gemini-embedding-2, 질문만 API로 임베딩) → RRF
  ③ 자격 판정 — LLM이 아닌 규칙(profile.ts). 조건별 충족/불가/확인 필요, '불가'는 제외
  ④ 역질문 — 상위 40개 후보에서 '확인 필요'를 가장 많이 만드는 항목부터 최대 3문항 × 2라운드
     (시·군·구, 대상 집단 질문의 선택지는 후보 데이터에서 동적으로 만듦)

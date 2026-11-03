@@ -1,4 +1,4 @@
-/** 하이브리드 검색: BM25(한글 2-gram) + 임베딩 의미검색(Voyage AI), RRF로 결합 */
+/** 하이브리드 검색: BM25(한글 2-gram) + 임베딩 의미검색(학교 BAZE Gateway), RRF로 결합 */
 import { POLICIES, policyEmbeddings } from "./data";
 
 const tokens = (s: string) => {
@@ -38,22 +38,25 @@ function bm25(query: string) {
   );
 }
 
-/* ---------- 임베딩 의미검색: 질문만 Voyage API로 임베딩 (정책 쪽은 미리 계산) ---------- */
+/* ---------- 임베딩 의미검색: 질문만 BAZE Gateway로 임베딩 (정책 쪽은 미리 계산·정규화) ---------- */
+const EMBED_URL = process.env.BAZE_EMBED_URL ?? "https://api.baze.co/v1/gateway/embeddings";
 const queryCache = new Map<string, Float32Array>();
 async function embedQuery(query: string, model: string, dim: number): Promise<Float32Array | null> {
-  const key = process.env.VOYAGE_API_KEY;
+  const key = process.env.BAZE_API_KEY;
   if (!key || process.env.RAG_EMBEDDINGS === "off") return null;
   const hit = queryCache.get(query);
   if (hit) return hit;
   try {
-    const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+    const res = await fetch(EMBED_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ input: [query], model, input_type: "query", output_dimension: dim }),
+      body: JSON.stringify({ model, input: [query], dimensions: dim }),
       signal: AbortSignal.timeout(4000),
     });
-    if (!res.ok) throw new Error(`Voyage ${res.status}`);
-    const v = Float32Array.from((await res.json()).data[0].embedding as number[]);
+    if (!res.ok) throw new Error(`BAZE embeddings ${res.status}`);
+    const raw = (await res.json()).data[0].embedding as number[];
+    const n = Math.sqrt(raw.reduce((a, x) => a + x * x, 0)) || 1;
+    const v = Float32Array.from(raw, (x) => x / n);
     if (queryCache.size > 500) queryCache.clear();
     queryCache.set(query, v);
     return v;

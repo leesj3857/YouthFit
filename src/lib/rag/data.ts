@@ -19,7 +19,7 @@ export const getPolicy = (id: string) => (BY_ID.has(id) ? POLICIES[BY_ID.get(id)
 export const getSaving = (id: string) => SAVING_BY_ID.get(id);
 
 /** 임베딩 메타 (scripts/build-embeddings.mjs 가 생성) */
-export interface EmbMeta { provider: "voyage"; model: string; dim: number; count: number }
+export interface EmbMeta { provider: "baze"; model: string; dim: number; count: number; hashes?: string[] }
 let emb: { vectors: Float32Array; meta: EmbMeta } | null | undefined;
 /** 정책 임베딩 (없거나 정책 수와 안 맞으면 null → 키워드 검색만) */
 export function policyEmbeddings() {
@@ -29,7 +29,7 @@ export function policyEmbeddings() {
     const meta = JSON.parse(readFileSync(path.join(dir, "policies.emb.json"), "utf8")) as EmbMeta;
     const buf = readFileSync(path.join(dir, "policies.emb"));
     const vectors = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-    emb = meta.count === POLICIES.length && vectors.length === POLICIES.length * meta.dim ? { vectors, meta } : null;
+    emb = meta.provider === "baze" && meta.count === POLICIES.length && vectors.length === POLICIES.length * meta.dim ? { vectors, meta } : null;
     if (!emb) console.warn("[rag] 임베딩이 정책 데이터와 맞지 않아 키워드 검색만 사용합니다. node scripts/build-embeddings.mjs 를 다시 실행하세요.");
   } catch {
     emb = null;
