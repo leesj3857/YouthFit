@@ -5,7 +5,12 @@ import { SIDO } from "./profile";
 const PARSE_MODEL = process.env.PARSE_MODEL ?? "claude-haiku-5-5";
 const REC_MODEL = process.env.REC_MODEL ?? "claude-sonnet-5-5";
 let client: Anthropic | null = null;
-const c = () => (client ??= new Anthropic());
+/** 학교 BAZE API Gateway 키가 있으면 게이트웨이로, 없으면 Anthropic API로 직접 호출 */
+export const BAZE_BASE_URL = process.env.BAZE_BASE_URL ?? "https://api.baze.co/v1/gateway/claude";
+const c = () =>
+  (client ??= process.env.BAZE_API_KEY
+    ? new Anthropic({ baseURL: BAZE_BASE_URL, authToken: process.env.BAZE_API_KEY, apiKey: null })
+    : new Anthropic());
 
 type Tool = { name: string; description: string; input_schema: Record<string, unknown> };
 

@@ -1,13 +1,13 @@
 """매일 데이터 갱신 (GitHub Actions에서 실행)
 1) DB에서 신청 기간 안의 정책을 읽고  2) 새로 생기거나 원문이 바뀐 정책만 Opus로 정형화
 3) 범위 검사  4) export_web.py로 ../src/data 갱신
-환경변수: DATABASE_URL, ANTHROPIC_API_KEY
+환경변수: DATABASE_URL, BAZE_API_KEY(학교 게이트웨이) 또는 ANTHROPIC_API_KEY
 선택: REFRESH_MAX(한 번에 처리할 최대 건수, 기본 150), REFRESH_MAX_USD(비용 상한, 기본 5)"""
 import json, os, re, sys, hashlib, subprocess
 import psycopg2, anthropic
 from dotenv import load_dotenv
 load_dotenv(".env")
-from extract_v2 import params, verify
+from extract_v2 import params, verify, make_client
 
 MAX_NEW = int(os.getenv("REFRESH_MAX", 150))
 MAX_USD = float(os.getenv("REFRESH_MAX_USD", 5))
@@ -48,7 +48,7 @@ def main():
     todo = [p for p in rows if hashes.get(p["plcy_no"]) != digest(p) or p["plcy_no"] not in results]
     limit = min(MAX_NEW, int(MAX_USD / EST_USD))
     print(f"DB 정책 {len(rows)}건 중 새로 정리할 정책 {len(todo)}건 (이번 실행 상한 {limit}건)")
-    client = anthropic.Anthropic(); done = 0; out_tok = 0
+    client = make_client(); done = 0; out_tok = 0
     for p in todo[:limit]:
         try:
             r = client.messages.create(**params(p))

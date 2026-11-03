@@ -1,5 +1,5 @@
-/** 하이브리드 검색: BM25(한글 2-gram) + 임베딩 의미검색(multilingual-e5-small), RRF로 결합 */
-import { DIM, POLICIES, policyEmbeddings } from "./data";
+/** 하이브리드 검색: BM25(한글 2-gram) + 임베딩 의미검색(Voyage AI), RRF로 결합 */
+import { POLICIES, policyEmbeddings } from "./data";
 
 const tokens = (s: string) => {
   const words = (s ?? "").replace(/[^0-9A-Za-z가-힣 ]/g, " ").split(/\s+/).filter(Boolean);
@@ -38,31 +38,40 @@ function bm25(query: string) {
   );
 }
 
-/* ---------- 임베딩 (서버에서 로컬 모델로 쿼리만 임베딩) ---------- */
-type Extractor = (t: string[], o: object) => Promise<{ data: Float32Array }>;
-let extractor: Promise<Extractor | null> | null = null;
-function getExtractor() {
-  extractor ??= (async () => {
-    if (process.env.RAG_EMBEDDINGS === "off") return null;
-    try {
-      const { pipeline } = await import("@huggingface/transformers");
-      return (await pipeline("feature-extraction", "Xenova/multilingual-e5-small", { dtype: "q8" })) as unknown as Extractor;
-    } catch (e) {
-      console.warn("[rag] 임베딩 모델을 불러오지 못해 키워드 검색만 사용합니다:", (e as Error).message);
-      return null;
-    }
-  })();
-  return extractor;
+/* ---------- 임베딩 의미검색: 질문만 Voyage API로 임베딩 (정책 쪽은 미리 계산) ---------- */
+const queryCache = new Map<string, Float32Array>();
+async function embedQuery(query: string, model: string, dim: number): Promise<Float32Array | null> {
+  const key = process.env.VOYAGE_API_KEY;
+  if (!key || process.env.RAG_EMBEDDINGS === "off") return null;
+  const hit = queryCache.get(query);
+  if (hit) return hit;
+  try {
+    const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ input: [query], model, input_type: "query", output_dimension: dim }),
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) throw new Error(`Voyage ${res.status}`);
+    const v = Float32Array.from((await res.json()).data[0].embedding as number[]);
+    if (queryCache.size > 500) queryCache.clear();
+    queryCache.set(query, v);
+    return v;
+  } catch (e) {
+    console.warn("[rag] 질문 임베딩 실패, 키워드 검색만 사용:", (e as Error).message);
+    return null;
+  }
 }
 async function semantic(query: string): Promise<number[] | null> {
   const E = policyEmbeddings();
-  const ext = E && (await getExtractor());
-  if (!E || !ext) return null;
-  const q = (await ext([`query: ${query}`], { pooling: "mean", normalize: true })).data;
+  if (!E) return null;
+  const q = await embedQuery(query, E.meta.model, E.meta.dim);
+  if (!q) return null;
+  const { vectors, meta: { dim } } = E;
   const out = new Array<number>(POLICIES.length);
   for (let i = 0; i < POLICIES.length; i++) {
     let s = 0;
-    for (let k = 0; k < DIM; k++) s += E[i * DIM + k] * q[k];
+    for (let k = 0; k < dim; k++) s += vectors[i * dim + k] * q[k];
     out[i] = s;
   }
   return out;
@@ -83,5 +92,5 @@ export async function searchPolicies(query: string, domains: string[] = []): Pro
 /** 서버 기동 직후 첫 요청이 느리지 않도록 미리 로드 */
 export function warmup() {
   bm25Index();
-  void getExtractor();
+  policyEmbeddings();
 }

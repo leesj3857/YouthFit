@@ -1,9 +1,16 @@
 """v2 세밀 추출 (Opus 5.5).  python extract_v2.py 30 [long]  → sample_v2.jsonl"""
-import json, re, sys, random, datetime, anthropic
+import json, os, re, sys, random, datetime, anthropic
 from rapidfuzz import fuzz
 from dotenv import load_dotenv
 load_dotenv(".env")
-client = anthropic.Anthropic()
+def make_client():
+    """학교 BAZE API Gateway 키(BAZE_API_KEY)가 있으면 게이트웨이로, 없으면 Anthropic API로"""
+    if os.getenv("BAZE_API_KEY"):
+        return anthropic.Anthropic(base_url=os.getenv("BAZE_BASE_URL", "https://api.baze.co/v1/gateway/claude"),
+                                   auth_token=os.environ["BAZE_API_KEY"], api_key=None)
+    return anthropic.Anthropic()
+
+client = make_client()
 MODEL = "claude-opus-5-5"
 
 N = lambda t, d=None: {"type": [t, "null"], **({"description": d} if d else {})}

@@ -15,8 +15,8 @@ type Body =
 
 /** POST /api/chat — 청핏 RAG 대화 (상태는 클라이언트가 보관) */
 export async function POST(req: Request) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return NextResponse.json({ error: "서버에 ANTHROPIC_API_KEY가 설정되지 않았어요." }, { status: 500 });
+  if (!process.env.BAZE_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+    return NextResponse.json({ error: "서버에 BAZE_API_KEY 또는 ANTHROPIC_API_KEY가 설정되지 않았어요." }, { status: 500 });
   }
   const limit = await checkLimit(clientIp(req));
   if (!limit.ok) return NextResponse.json({ error: limit.message }, { status: 429 });

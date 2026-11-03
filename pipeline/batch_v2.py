@@ -3,7 +3,8 @@
   python batch_v2.py submit all      # 전체
   python batch_v2.py status [golden|all]
   python batch_v2.py collect [golden|all]   → results_v2.jsonl / sample_v2.jsonl
-비용 상한 MAX_USD를 넘을 것으로 예상되면 제출하지 않음."""
+비용 상한 MAX_USD를 넘을 것으로 예상되면 제출하지 않음.
+※ Batch API는 Anthropic 키로만 동작해요 (학교 BAZE 게이트웨이는 배치 미지원). BAZE만 있으면 refresh.py 를 쓰세요."""
 import json, sys, os, anthropic
 from dotenv import load_dotenv
 load_dotenv(".env")
