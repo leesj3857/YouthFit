@@ -4,19 +4,37 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Keyb
 import Link from "next/link";
 import { ArrowUp, RotateCcw } from "lucide-react";
 import {
-  followUpsFor,
-  RAG_STEPS_ASK,
-  RAG_STEPS_FINAL,
-  RAG_STEPS_INTRO,
-  RAG_STEPS_NEXT,
+  ApiError,
+  EMPLOYMENT_LABEL,
+  INTEREST_LABEL,
+  SIDO_NAME,
+  createSession,
+  getRecommendations,
+  submitAnswers,
+  type ApiAnswer,
+  type AppliedConditions,
+  type RecommendationResponse,
+  type SessionResponse,
+} from "@/lib/api";
+import {
+  CHIP_REANSWER,
+  CHIP_RESET,
+  CHIP_RETRY,
+  SLOW_NOTICE,
+  STEPS_FINAL,
+  STEPS_INTRO,
   STORE_KEY,
   formatAnswer,
+  matchOption,
+  toQuestion,
+  toValues,
+  type AnswerValue,
+  type Question,
 } from "@/lib/chat-flow";
-import type { AnswerValue, ChatReply, ChatState, Question, QuestionKey, Turn } from "@/lib/rag/types";
 import { StreamingText } from "./streaming-text";
 import { QuestionWidget } from "./question-widgets";
 import { Thinking } from "./thinking";
-import { RecommendationView, type FeedbackMeta, type ResultReply } from "./recommendation";
+import { RecommendationView, type FeedbackMeta, type RecResult } from "./recommendation";
 import { cn } from "@/lib/utils";
 
 /* ---------- 메시지 모델 ---------- */
@@ -31,23 +49,26 @@ type Msg = (
       text: string;
       question?: Question;
       answered?: boolean;
-      rec?: ResultReply;
+      rec?: RecResult;
       meta?: FeedbackMeta;
       followUps?: string[];
     }
 ) & {
-  /** 상세 페이지에서 돌아와 복원된 메시지는 다시 스트리밍하지 않는다 */
+  /** 새로고침·뒤로가기로 복원된 메시지는 다시 스트리밍하지 않는다 */
   restored?: boolean;
 };
 
-type Answers = Partial<Record<QuestionKey, AnswerValue | null>>;
+/** 백엔드 세션에서 화면이 계속 쓰는 값 */
+type Session = { id: string; questions: Question[]; conditions: AppliedConditions; total: number };
+/** 질문 id → 고른 선택지 value 들 (건너뛴 질문은 없음) */
+type Answers = Record<string, string[]>;
 type Snapshot = {
   query?: string;
   messages: Msg[];
-  state: ChatState | null;
+  session: Session | null;
   queue: Question[];
   acc: Answers;
-  rec: ResultReply | null;
+  rec: RecResult | null;
 };
 
 const isThinking = (m?: Msg) => m?.role === "assistant" && m.kind === "thinking";
@@ -57,21 +78,39 @@ const nid = () => `m${Date.now().toString(36)}${seq++}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const SUGGESTIONS = [
-  "서울 사는 26살 취준생인데 받을 수 있는 지원금이랑 적금 알려줘",
+  "서울 사는 26살 취준생인데 받을 수 있는 지원금 알려줘",
   "자취 중인데 월세 지원 받을 수 있을까?",
-  "사회초년생인데 목돈 모으기 좋은 적금 추천해줘",
-  "광주 사는 대학생인데 자격증 응시료 지원되는 거 있어?",
+  "부산 사는 28살 직장인인데 목돈 마련 지원 있어?",
+  "광주 사는 대학생인데 교육비 지원되는 거 있어?",
 ];
 
 const ACKS = ["알겠어요.", "좋아요.", "확인했어요.", "네, 반영할게요."];
 
-type ApiOk = { state: ChatState; reply: ChatReply };
+/** 서버가 문장에서 읽어낸 조건을 한 줄로 */
+function conditionLine(c: AppliedConditions) {
+  const parts = [
+    c.sido_code ? SIDO_NAME[c.sido_code] : null,
+    c.age != null ? `만 ${c.age}세` : null,
+    c.employment_status ? EMPLOYMENT_LABEL[c.employment_status] : null,
+  ].filter(Boolean);
+  const topics = c.interests.map((i) => INTEREST_LABEL[i]).filter(Boolean);
+  return { who: parts.join(" · "), topics: topics.join("·") };
+}
 
-async function callApi<T>(body: object): Promise<T> {
-  const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? "잠시 후 다시 시도해주세요.");
-  return data as T;
+function introText(s: Session) {
+  const { who, topics } = conditionLine(s.conditions);
+  const head = who ? `**${who}**인 분께 맞는 ${topics ? `${topics} ` : ""}정책을 찾고 있어요.` : `${topics ? `${topics} ` : ""}정책을 찾고 있어요.`;
+  const region = s.conditions.sido_code ? "" : "\n사는 지역을 말씀해주시면(예: “서울 사는 …”) 지역 정책도 함께 찾아드려요. 지금은 전국 정책만 봤어요.";
+  return `${head} 지금 조건으로 신청할 수 있는 정책 후보가 **${s.total.toLocaleString()}건**이에요.${region}`;
+}
+
+function feedbackMeta(c: AppliedConditions): FeedbackMeta {
+  return {
+    age: c.age ?? undefined,
+    sido: c.sido_code ? SIDO_NAME[c.sido_code] : undefined,
+    employment: c.employment_status ?? undefined,
+    domains: c.interests,
+  };
 }
 
 /* ---------- 컴포넌트 ---------- */
@@ -82,14 +121,16 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   const [busy, setBusy] = useState(false);
 
   // 비동기 흐름에서 최신 값을 읽기 위한 ref들
-  const chatState = useRef<ChatState | null>(null);
+  const session = useRef<Session | null>(null);
   const queue = useRef<Question[]>([]);
   const acc = useRef<Answers>({});
   const pendingId = useRef<string | null>(null);
-  const rec = useRef<ResultReply | null>(null);
+  const rec = useRef<RecResult | null>(null);
   const runToken = useRef(0);
   const startedOnce = useRef(false);
   const firstQuery = useRef<string | undefined>(undefined);
+  /** 실패했을 때 "다시 시도"가 다시 실행할 동작 */
+  const retry = useRef<(() => void) | null>(null);
 
   const lastUserSeen = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -108,24 +149,33 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     let settled = false;
     const guarded = work.finally(() => { settled = true; });
     guarded.catch(() => {}); // 실패는 아래에서 처리 — 대기 중 미처리 거부 경고 방지
+    // 응답이 오래 걸리면(무료 서버가 잠들어 있던 경우) 기다리는 이유를 알려준다
+    const slow = setTimeout(() => {
+      if (!settled && token === runToken.current) patch(id, { steps: [...steps.slice(0, -1), SLOW_NOTICE], active: steps.length - 1 });
+    }, 6000);
     for (let i = 1; i < steps.length; i++) {
-      await sleep(600 + Math.random() * 400);
-      if (token !== runToken.current) return null;
+      await sleep(settled ? 250 : 600 + Math.random() * 400);
+      if (token !== runToken.current) return clearTimeout(slow), null;
       patch(id, { active: i });
     }
     let result: T;
     try {
       result = await guarded;
     } catch (e) {
+      clearTimeout(slow);
       if (token !== runToken.current) return null;
-      patch(id, { active: steps.length, done: true });
+      patch(id, { steps, active: steps.length, done: true });
       await sleep(420);
-      push({ id: nid(), role: "assistant", kind: "text", text: `앗, ${(e as Error).message}`, followUps: ["조건 바꿔서 다시 찾기"] });
+      const err = e instanceof ApiError ? e : new ApiError("잠시 후 다시 시도해주세요.", 0);
+      // 만료(404)·잘못된 요청(422)은 다시 시도해도 같으니 처음부터, 나머지는 다시 시도할 수 있게
+      const canRetry = err.status !== 404 && err.status !== 422 && !!retry.current;
+      push({ id: nid(), role: "assistant", kind: "text", text: `앗, ${err.message}`, followUps: canRetry ? [CHIP_RETRY, CHIP_RESET] : [CHIP_RESET] });
       setBusy(false);
       return null;
     }
-    if (!settled || token !== runToken.current) return null;
-    patch(id, { active: steps.length });
+    clearTimeout(slow);
+    if (token !== runToken.current) return null;
+    patch(id, { steps, active: steps.length });
     await sleep(250);
     patch(id, { done: true });
     // 단계 목록이 다 접힌 다음에 답변이 시작되도록 (접히는 중에 글자가 올라붙으면 화면이 출렁임)
@@ -144,50 +194,88 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     return true;
   }, []);
 
-  const handle = useCallback(
-    ({ state, reply }: ApiOk) => {
-      chatState.current = state;
-      if (reply.type === "text") {
-        push({ id: nid(), role: "assistant", kind: "text", text: reply.text, followUps: followUpsFor(rec.current) });
+  /** 모은 답을 서버에 반영하고(전체 덮어쓰기) 최종 추천을 받는다 */
+  const finish = useCallback(
+    async (token: number) => {
+      const s = session.current;
+      if (!s) return;
+      setBusy(true);
+      retry.current = () => void finish(runToken.current);
+      const answers: ApiAnswer[] = Object.entries(acc.current).map(([question_id, values]) => ({ question_id, values }));
+      const work = (async (): Promise<{ total: number; res: RecommendationResponse }> => {
+        const narrowed = await submitAnswers(s.id, answers);
+        return { total: narrowed.candidates.policies.total, res: await getRecommendations(s.id) };
+      })();
+      const r = await thinkWhile(STEPS_FINAL, work, token);
+      if (!r) return;
+      retry.current = null;
+      const before = s.total;
+      session.current = { ...s, total: r.total };
+      const chips = s.questions.length ? [CHIP_REANSWER, CHIP_RESET] : [CHIP_RESET];
+      if (r.res.items.length === 0) {
+        rec.current = null;
+        push({
+          id: nid(), role: "assistant", kind: "text",
+          text: "지금 조건에 맞는 정책을 찾지 못했어요. 답변을 바꾸거나, 지역·나이·상황을 넣어 다시 물어봐 주세요.",
+          followUps: chips,
+        });
         setBusy(false);
         return;
       }
-      if (reply.type === "questions") {
-        queue.current = [...reply.questions];
-        acc.current = {};
-        askFromQueue(`${reply.intro}\n\n`);
-        return;
-      }
-      rec.current = reply;
-      const p = state.profile;
-      const meta: FeedbackMeta = { age: p.age, sido: p.sido, employment: p.employment, domains: state.domains };
-      push({ id: nid(), role: "assistant", kind: "text", text: reply.summary, rec: reply, meta, followUps: followUpsFor(reply) });
+      const result: RecResult = { asOf: r.res.as_of, total: r.total, items: r.res.items };
+      rec.current = result;
+      const narrowedText = answers.length && r.total < before ? `답변을 반영하니 후보가 **${r.total.toLocaleString()}건**으로 좁혀졌어요. ` : `후보 **${r.total.toLocaleString()}건** 가운데 `;
+      push({
+        id: nid(), role: "assistant", kind: "text",
+        text: `${narrowedText}${answers.length && r.total < before ? "그중 " : ""}지금 조건에 가장 잘 맞는 **${r.res.items.length}건**을 골랐어요.`,
+        rec: result, meta: feedbackMeta(s.conditions), followUps: chips,
+      });
       setBusy(false);
     },
-    [askFromQueue],
-  );
-
-  const submit = useCallback(
-    async (token: number, text?: string) => {
-      const work = callApi<ApiOk>({ action: "answer", state: chatState.current, answers: acc.current, text });
-      const steps = (chatState.current?.round ?? 0) >= 2 ? RAG_STEPS_FINAL : RAG_STEPS_NEXT;
-      const r = await thinkWhile(steps, work, token);
-      if (r) handle(r);
-    },
-    [thinkWhile, handle],
+    [thinkWhile],
   );
 
   const start = useCallback(
     async (query: string) => {
       const token = ++runToken.current;
       setBusy(true);
+      session.current = null;
+      queue.current = [];
+      acc.current = {};
+      pendingId.current = null;
+      rec.current = null;
       push({ id: nid(), role: "user", text: query });
-      firstQuery.current = query;
-      syncUrl(query);
-      const r = await thinkWhile(RAG_STEPS_INTRO, callApi<ApiOk>({ action: "start", text: query }), token);
-      if (r) handle(r);
+      if (!firstQuery.current) {
+        firstQuery.current = query;
+        syncUrl(query);
+      }
+      const run = async (t: number) => {
+        retry.current = () => void run(runToken.current);
+        const r = await thinkWhile<SessionResponse>(STEPS_INTRO, createSession(query), t);
+        if (!r) return;
+        retry.current = null;
+        const s: Session = {
+          id: r.session_id,
+          questions: r.questions.map(toQuestion),
+          conditions: r.candidates.conditions,
+          total: r.candidates.policies.total,
+        };
+        session.current = s;
+        if (s.total === 0) {
+          push({
+            id: nid(), role: "assistant", kind: "text",
+            text: "지금 조건에 맞는 정책을 찾지 못했어요. 지역·나이·상황을 조금 바꿔서 다시 물어봐 주세요.",
+            followUps: [CHIP_RESET],
+          });
+          setBusy(false);
+          return;
+        }
+        queue.current = [...s.questions];
+        if (!askFromQueue(`${introText(s)}\n더 정확히 고르려고 몇 가지만 여쭤볼게요.\n\n`)) await finish(t);
+      };
+      await run(token);
     },
-    [thinkWhile, handle],
+    [thinkWhile, askFromQueue, finish],
   );
 
   async function answer(msgId: string, q: Question, value: AnswerValue | null) {
@@ -197,66 +285,66 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     setBusy(true);
     patch(msgId, { answered: true });
     push({ id: nid(), role: "user", text: value === null ? "잘 모르겠어요" : formatAnswer(q, value) });
-    acc.current[q.key] = value;
+    if (value === null) delete acc.current[q.id];
+    else acc.current[q.id] = toValues(value);
     await sleep(450);
     if (token !== runToken.current) return;
-    if (!askFromQueue(ACKS[Object.keys(acc.current).length % ACKS.length])) await submit(token);
+    if (!askFromQueue(ACKS[Object.keys(acc.current).length % ACKS.length])) await finish(token);
   }
 
-  /** 질문이 떠 있는 상태에서 직접 입력한 경우: 서버가 문장을 해석해 반영하고 필요한 것만 다시 묻는다 */
-  async function freeAnswer(text: string) {
+  /** 질문이 떠 있는 상태에서 직접 입력한 경우: 선택지와 맞으면 그 답으로, 아니면 선택지를 다시 안내한다 */
+  function freeAnswer(text: string) {
     const id = pendingId.current!;
-    pendingId.current = null;
-    queue.current = [];
-    const token = runToken.current;
-    setBusy(true);
+    const msg = messages.find((m) => m.id === id);
+    const q = msg?.role === "assistant" && msg.kind === "text" ? msg.question : undefined;
+    if (!q) return;
+    const hit = matchOption(q, text);
+    if (hit) return void answer(id, q, hit);
     patch(id, { answered: true });
     push({ id: nid(), role: "user", text });
-    await submit(token, text);
+    const next = nid();
+    pendingId.current = next;
+    push({ id: next, role: "assistant", kind: "text", text: `아래 선택지 중에서 골라주세요. 해당하는 게 없으면 건너뛰어도 괜찮아요.\n\n${q.text}`, question: q });
   }
 
-  async function followUp(text: string) {
-    if (text === "조건 바꿔서 다시 찾기") return reset();
-    const token = runToken.current;
-    setBusy(true);
-    // 대화 전체를 함께 보낸다 (질문과 답, 추천된 항목 이름까지). 길면 서버가 앞부분을 요약한다
-    const history: Turn[] = messages
-      .filter((m): m is Extract<Msg, { role: "user" }> | Extract<Msg, { kind: "text" }> => m.role === "user" || m.kind === "text")
-      .slice(-60)
-      .map((m) => {
-        if (m.role === "user") return { role: "user" as const, text: m.text };
-        const items = m.rec ? [...m.rec.policies, ...m.rec.savings].map((x) => x.name) : [];
-        return { role: "assistant" as const, text: items.length ? `${m.text}\n(추천한 항목: ${items.join(", ")})` : m.text };
-      });
-    push({ id: nid(), role: "user", text });
-    const r = await thinkWhile(
-      RAG_STEPS_ASK,
-      callApi<ApiOk>({ action: "ask", state: chatState.current, question: text, history }),
-      token,
-    );
-    if (r) handle(r);
+  /** 같은 세션에서 질문에 다시 답한다 (서버가 이전 답을 전부 덮어쓴다) */
+  function reanswer() {
+    const s = session.current;
+    if (!s?.questions.length) return reset();
+    push({ id: nid(), role: "user", text: "답변을 다시 고를게요" });
+    acc.current = {};
+    rec.current = null;
+    queue.current = [...s.questions];
+    askFromQueue("좋아요, 처음부터 다시 여쭤볼게요.\n\n");
+  }
+
+  function followUp(text: string) {
+    if (busy) return;
+    if (text === CHIP_RESET) return reset();
+    if (text === CHIP_REANSWER) return reanswer();
+    if (text === CHIP_RETRY && retry.current) {
+      setBusy(true);
+      return retry.current();
+    }
   }
 
   function send(raw: string) {
     const text = raw.trim();
     if (!text || busy) return;
     setInput("");
-    if (messages.length === 0) start(text);
-    else if (pendingId.current) freeAnswer(text);
-    else if (rec.current) followUp(text);
-    else {
-      reset();
-      setTimeout(() => start(text), 0);
-    }
+    if (pendingId.current) freeAnswer(text);
+    // 추천 뒤에(또는 처음에) 새 문장을 보내면 그 문장으로 새로 찾는다
+    else void start(text);
   }
 
   function reset() {
     runToken.current++;
-    chatState.current = null;
+    session.current = null;
     queue.current = [];
     acc.current = {};
     pendingId.current = null;
     rec.current = null;
+    retry.current = null;
     firstQuery.current = undefined;
     setMessages([]);
     setBusy(false);
@@ -276,13 +364,13 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     } catch {
       // 저장소 접근 불가(시크릿 모드 등) — 새 대화로 시작
     }
-    // 상세 페이지에서 돌아왔거나(상단 뒤로가기·브라우저 뒤로가기 모두), ?q= 없이 들어왔거나, 같은 질문이면 이전 대화를 복원
+    // 다른 화면에서 돌아왔거나(상단 뒤로가기·브라우저 뒤로가기 모두), ?q= 없이 들어왔거나, 같은 질문이면 이전 대화를 복원
     const returning = readSession(RETURN_KEY) === "1";
     try {
       sessionStorage.removeItem(RETURN_KEY);
     } catch {}
     if (snap && (returning || !initialQuery || snap.query === initialQuery)) {
-      chatState.current = snap.state;
+      session.current = snap.session;
       queue.current = snap.queue;
       acc.current = snap.acc;
       rec.current = snap.rec;
@@ -290,13 +378,18 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       const last = snap.messages.at(-1);
       if (last?.role === "assistant" && last.kind === "text" && last.question && !last.answered) pendingId.current = last.id;
       // sessionStorage는 서버 렌더링 중엔 읽을 수 없어서 마운트 직후 한 번만 복원한다
-      setMessages(snap.messages.filter((m) => !(m.role === "assistant" && m.kind === "thinking" && !m.done)).map((m) => ({ ...m, restored: true })));
+      setMessages(
+        snap.messages
+          .filter((m) => !(m.role === "assistant" && m.kind === "thinking" && !m.done))
+          // "다시 시도"는 복원 후엔 실행할 동작이 없으니 뺀다
+          .map((m) => ({ ...m, restored: true, ...("followUps" in m && m.followUps ? { followUps: m.followUps.filter((f) => f !== CHIP_RETRY) } : {}) }) as Msg),
+      );
       return;
     }
     if (initialQuery) start(initialQuery);
   }, [initialQuery, start]);
 
-  /* ----- 상세 페이지 갔다 돌아와도 대화가 남아 있도록 ----- */
+  /* ----- 새로고침하거나 다른 화면을 다녀와도 대화가 남아 있도록 ----- */
   useEffect(() => {
     if (busy) return;
     try {
@@ -305,7 +398,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
         const snap: Snapshot = {
           query: firstQuery.current,
           messages,
-          state: chatState.current,
+          session: session.current,
           queue: queue.current,
           acc: acc.current,
           rec: rec.current,
@@ -334,7 +427,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       if (docTop(r) < anchor) collapsing += r.offsetHeight;
     }
     const restored = first && messages.some((m) => "restored" in m && m.restored);
-    // 상세 페이지에서 돌아온 경우엔 떠나기 전에 보던 위치로
+    // 다른 화면에서 돌아온 경우엔 떠나기 전에 보던 위치로
     const saved = restored ? Number(readSession(SCROLL_KEY) ?? NaN) : NaN;
     if (!Number.isNaN(saved)) window.scrollTo({ top: saved, behavior: "instant" });
     else window.scrollTo({ top: Math.max(0, anchor - collapsing - TOP_GAP), behavior: restored ? "instant" : "smooth" });
@@ -363,7 +456,9 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
    * (스크롤할 때마다 저장하면 페이지를 떠나며 맨 위로 올라가는 순간의 0이 덮어써 버린다) */
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
-      if (!(e.target instanceof Element) || !e.target.closest("a[href]")) return;
+      const a = e.target instanceof Element ? e.target.closest<HTMLAnchorElement>("a[href]") : null;
+      // 새 탭으로 여는 공식 사이트 링크는 이 화면을 떠나지 않는다
+      if (!a || a.target === "_blank") return;
       try {
         sessionStorage.setItem(SCROLL_KEY, String(Math.round(window.scrollY)));
         sessionStorage.setItem(RETURN_KEY, "1");
@@ -462,8 +557,8 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
                 empty
                   ? "어떤 혜택이 궁금하세요?"
                   : waitingAnswer
-                    ? "직접 입력해도 괜찮아요"
-                    : "더 궁금한 점을 물어보세요"
+                    ? "선택지를 고르거나 직접 입력해도 괜찮아요"
+                    : "다른 조건으로 다시 물어보세요"
               }
               aria-label="메시지 입력"
               className="field-sizing-content max-h-40 min-h-[40px] flex-1 resize-none bg-transparent py-2 text-[16px] leading-6 text-grey-900 outline-none placeholder:text-grey-400"
@@ -500,7 +595,7 @@ function EmptyState({ onPick }: { onPick: (s: string) => void }) {
         찾고 계세요?
       </h1>
       <p className="mt-3 animate-fade-up text-[16px] text-grey-600" style={{ animationDelay: "60ms" }}>
-        편하게 한 문장으로 말해주세요. 몇 가지만 여쭤보고 딱 맞는 정책과 예적금을 골라드릴게요.
+        편하게 한 문장으로 말해주세요. 몇 가지만 여쭤보고 지금 신청할 수 있는 청년 정책을 골라드릴게요.
       </p>
       <ul className="-mx-3 mt-10">
         <li className="px-3 pb-2 text-[13px] font-medium text-grey-500">이렇게 물어볼 수 있어요</li>

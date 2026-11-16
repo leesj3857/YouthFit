@@ -1,13 +1,14 @@
 # 청핏 (YouthFit)
 
-LLM 기반 역질문 대화로 완성하는 청년 정책·금융상품 통합 추천 서비스 — 프론트엔드.
+LLM 기반 역질문 대화로 완성하는 청년 정책 추천 서비스 — 프론트엔드.
+추천은 YouthFit 백엔드 API가 하고, 프론트는 그 응답을 그대로 그린다.
 
 ## 실행
 
 ```bash
 pnpm install
-cp .env.example .env.local   # YOUTHCENTER_API_KEY, ANTHROPIC_API_KEY 입력
-pnpm dev
+cp .env.example .env.local   # 비워두면 개발 서버(Render) 백엔드를 쓴다
+pnpm dev                     # http://localhost:3000 (백엔드 CORS 기본 허용 주소)
 ```
 
 ## 구조
@@ -17,81 +18,56 @@ src/
 ├── app/
 │   ├── page.tsx                  # 홈: 질문 입력(→ /chat)
 │   ├── chat/page.tsx             # 대화형 추천 화면 (?q= 로 첫 질문 전달)
-│   ├── policies/[id]/page.tsx    # 추천 정책 상세
-│   ├── products/[id]/page.tsx    # 추천 예적금 상세 + 만기 계산기
+│   ├── privacy/page.tsx          # 이용안내·개인정보 처리방침
 │   ├── layout.tsx                # Pretendard 폰트, 메타데이터
-│   ├── api/chat/route.ts         # POST /api/chat — RAG 역질문 추천 (start / answer / ask)
-│   └── api/policies/route.ts     # GET /api/policies — 온통청년 실시간 조회
-├── data/                         # youthfit-enrich/export_web.py 가 만든 정형화 데이터
-│   ├── policies.json             # 정책 1,687건 (자격 조건 + 원문 근거)
-│   ├── savings.json              # 금감원 적금 337개 + 기간별 금리
-│   ├── policies.emb              # 정책 임베딩 512차원 (scripts/build-embeddings.mjs, BAZE gemini-embedding-2)
-│   └── policies.emb.json         # 임베딩 모델 정보
+│   ├── api/feedback/route.ts     # POST /api/feedback — 추천 평가(👍/👎) 저장 (Upstash)
+│   └── api/policies/route.ts     # GET /api/policies — 온통청년 실시간 조회 (현재 화면에서 미사용)
 ├── components/
 │   ├── chat/chat-composer.tsx    # 홈 입력창 (/chat 으로 이동)
-│   ├── chat/chat-view.tsx        # 대화 엔진 + 메시지 렌더 (sessionStorage로 대화 복원)
+│   ├── chat/chat-view.tsx        # 대화 흐름(세션 → 칩 답변 → 추천) + 메시지 렌더, sessionStorage로 복원
 │   ├── chat/streaming-text.tsx   # 글자 단위 스트리밍 텍스트
-│   ├── chat/question-widgets.tsx # 질문 타입: 단일(칩/리스트)·복수·슬라이더·예/아니오
-│   ├── chat/thinking.tsx         # RAG 검색 단계 표시
-│   ├── chat/recommendation.tsx   # 최종 추천 (정책 + 예적금)
-│   ├── policy/policy-feed.tsx    # (현재 미사용) 온통청년 API 최신 정책 피드
-│   ├── policy/policy-row.tsx     # 정책 한 줄
-│   ├── policy/api-status.tsx     # 응답 코드/건수/응답시간/요청 URL 표시
-│   ├── policy/category-tabs.tsx  # 대분류 필터 (?category=)
+│   ├── chat/question-widgets.tsx # 질문 위젯: 단일(칩/리스트)·복수
+│   ├── chat/thinking.tsx         # 진행 단계 표시
+│   ├── chat/recommendation.tsx   # 최종 추천 카드 (이유·확인할 점·공식 링크)
+│   ├── policy/                   # (현재 미사용) 온통청년 API 정책 피드
 │   ├── layout/                   # 헤더/푸터
 │   └── ui/                       # shadcn/ui
 └── lib/
+    ├── api.ts                    # 백엔드 API 클라이언트 + 응답 타입 + 표시용 라벨
+    ├── chat-flow.ts              # 서버 질문 → 위젯 변환, 답변 표시, 단계 문구
+    ├── format.ts                 # 날짜·D-day
+    ├── ratelimit.ts              # 피드백 저장소·호출 제한
     ├── youthcenter.ts            # server-only: fetchPolicies()
-    ├── policy.ts                 # 타입 + 표시용 헬퍼 (client/server 공용)
-    ├── chat-flow.ts              # 답변 표시·검색 단계 문구 (UI 헬퍼)
-    ├── format.ts                 # 금액·날짜·만기 계산
-    └── rag/                      # 서버: 추천 엔진
-        ├── types.ts              # Question·ChatState·추천 결과 타입 (프론트 공용)
-        ├── data.ts               # 데이터·임베딩 로드
-        ├── search.ts             # BM25 + 임베딩 하이브리드 검색
-        ├── profile.ts            # 역질문 템플릿·응답 반영·자격 판정(규칙)
-        ├── llm.ts                # Claude: 의도 파싱·추천 이유·추천 후 질문 답변
-        └── engine.ts             # start / answer / ask
+    └── policy.ts                 # 타입 + 표시용 헬퍼
 ```
 
-## 온통청년 API 메모
-
-- 엔드포인트: `https://www.youthcenter.go.kr/go/ythip/getPlcy` (`apiKeyNm`, `pageNum`, `pageSize`, `rtnType=json`)
-- 검색 파라미터: `plcyKywdNm`(키워드), `plcyNm`(정책명), `lclsfNm`(대분류), `zipCd`(시군구 5자리)
-- 대분류 실제 값: `일자리`, `주거`, `교육･직업훈련`, `금융･복지･문화`, `참여･기반` — 필터는 `주거`, `교육`처럼 앞 단어만 넣어도 동작
-- 접수 구분 `aplyPrdSeCd`: `0057001` 특정기간(`aplyYmd` = `YYYYMMDD ~ YYYYMMDD`, 회차가 여러 개면 `\N` 구분), `0057002` 상시, `0057003` 마감
-- 연령: `sprtTrgtAgeLmtYn=N`일 때만 `sprtTrgtMinAge/MaxAge` 유효
 - 상세 페이지: `https://www.youthcenter.go.kr/youthPolicy/ythPlcyTotalSearch/ythPlcyDetail/{plcyNo}`
 
-## AI 추천 구조
+## 백엔드 API 연동
+
+필드 정의의 기준은 백엔드 Swagger(`{Base URL}/docs`)다. 주소는 `NEXT_PUBLIC_API_BASE_URL`(기본: 개발 서버).
 
 ```
-"서울 사는 26살 취준생인데 월세 지원이랑 적금 추천해줘"
- ① 의도 파싱 (Claude Haiku 5.5) — 나이·지역·취업상태·관심 분야·검색어
- ② 하이브리드 검색 — BM25(한글 2-gram) + 의미 검색(BAZE Gateway gemini-embedding-2, 질문만 API로 임베딩) → RRF
- ③ 자격 판정 — LLM이 아닌 규칙(profile.ts). 조건별 충족/불가/확인 필요, '불가'는 제외
- ④ 역질문 — 상위 40개 후보에서 '확인 필요'를 가장 많이 만드는 항목부터 최대 3문항 × 2라운드
-    (시·군·구, 대상 집단 질문의 선택지는 후보 데이터에서 동적으로 만듦)
- ⑤ 추천 (Claude Sonnet 5.5) — 판정이 끝난 후보 중 순위·이유·주의사항. 후보에 없는 id는 버림
- ⑥ 추천 후 질문 — 추천된 정책·적금의 공고 원문을 근거로 답변
+"서울 사는 25살 취준생인데 주거 지원 받을 수 있을까요?"
+ ① POST /v1/sessions                       → session_id, 역질문(칩), 1차 후보 수
+ ② 질문을 하나씩 보여주고 답을 모음 (건너뛰기 가능, 직접 입력하면 선택지와 맞춰 봄)
+ ③ POST /v1/sessions/{id}/answers          → 답 반영 (보낼 때마다 전체 덮어쓰기)
+ ④ POST /v1/sessions/{id}/recommendations  → 최대 5건 + reason + check_points
 ```
 
-- 상태(프로필·검색어·라운드)는 클라이언트가 들고 매 요청에 보냄 → 서버 세션 저장소 없이 Vercel에서 동작
-- 질문은 `Question` 스키마(`question-widgets.tsx`가 렌더)로 내려옴
-- 한 번 추천받는 데 API 비용 약 $0.03
-
-### 데이터 갱신
-`~/dev/youthfit-enrich` (Python)에서 정형화한 결과를 내보낸다.
-```bash
-python export_web.py ~/Desktop/youthfit/src/data    # DB(읽기 전용) + 정형화 결과 → JSON
-cd ~/Desktop/youthfit && node scripts/build-embeddings.mjs
-npx tsx scripts/scenarios.mts                       # 페르소나 5개로 '자격 불가 정책 추천' 여부 검사
-```
+- 칩은 `options[].value`만 보내고, 화면 문구는 `label`/`text`를 쓴다. 질문 `id`·선택지는 바꾸지 않는다.
+- 카드의 링크·신청 기간·자격 표시는 `items[].policy`(DB 값)에서만 만든다. `reason`·`check_points`는 문구로만 보여준다.
+- `reason_source: "template"`도 정상 응답으로 그대로 보여준다.
+- 오류: 404(세션 만료) → 처음부터 다시, 429 → `Retry-After` 안내 + 다시 시도, 연결 실패·5xx → 다시 시도.
+- 개발 서버(Render 무료)는 잠들어 있으면 첫 응답이 1분쯤 걸려서, 6초가 넘으면 "서버를 깨우는 중" 문구를 보여준다.
+- "답변 다시 고르기"는 같은 세션에서 질문을 다시 묻고 답을 통째로 다시 보낸다. 새 문장을 입력하면 새 세션으로 찾는다.
+- 배포 도메인은 백엔드 CORS(`CORS_ORIGINS`)에 등록돼 있어야 한다.
 
 ## 아직 없는 것
 
-- 금융감독원 정기예금 — 적금만 수집 중
-- 온통청년 데이터 자동 갱신 — 지금은 수동 (위 '데이터 갱신')
+- 예·적금 추천 — 백엔드에 적금 API가 없어 정책만 추천
+- 추천 뒤 자유 질문(꼬리 질문) — 백엔드에 대화 API가 없음
+- 정책 상세 화면 — 카드에서 공식 페이지로 바로 연결
 
 ## 상세 패널 (`policy-detail.tsx`)
 

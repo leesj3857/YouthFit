@@ -8,9 +8,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "청핏 YouthFit — 나에게 맞는 청년 정책·금융상품",
+  title: "청핏 YouthFit — 나에게 맞는 청년 정책",
   description:
-    "한 문장으로 물어보면 몇 가지 되묻고, 지원금과 우대 적금을 근거와 함께 추천합니다.",
+    "한 문장으로 물어보면 몇 가지 되묻고, 지금 신청할 수 있는 청년 정책을 이유와 함께 추천합니다.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

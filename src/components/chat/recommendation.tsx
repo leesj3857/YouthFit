@@ -1,155 +1,147 @@
 "use client";
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import Link from "next/link";
-import { ChevronRight, ThumbsDown, ThumbsUp } from "lucide-react";
-import { daysLeft, estimateMaturity, formatDate, formatManwon } from "@/lib/format";
-import type { ChatReply, RecPolicy } from "@/lib/rag/types";
-import { BankMark, InterestIcon } from "@/components/catalog-icons";
+import { ArrowUpRight, ThumbsDown, ThumbsUp } from "lucide-react";
+import { SIDO_NAME, type PolicyCandidate, type Recommendation } from "@/lib/api";
+import { daysLeft, formatDate } from "@/lib/format";
+import { CategoryIcon } from "@/components/catalog-icons";
 import { cn } from "@/lib/utils";
 
-export type ResultReply = Extract<ChatReply, { type: "result" }>;
+/** 최종 추천 결과 (백엔드 /recommendations 응답 + 좁혀진 후보 수) */
+export type RecResult = { asOf: string; total: number; items: Recommendation[] };
 /** 피드백 분석용 요약 (원문 대화는 보내지 않음) */
 export type FeedbackMeta = { age?: number; sido?: string; employment?: string; domains?: string[] };
 
 const stagger = (i: number): CSSProperties => ({ animationDelay: `${i * 70}ms` });
 
-function useCountUp(target: number, animate: boolean, ms = 900) {
-  const [v, setV] = useState(animate ? 0 : target);
-  useEffect(() => {
-    if (!animate) return;
-    let raf = 0;
-    const t0 = performance.now();
-    const loop = (t: number) => {
-      const k = Math.min(1, (t - t0) / ms);
-      setV(Math.round(target * (1 - Math.pow(1 - k, 3))));
-      if (k < 1) raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [target, animate, ms]);
-  return v;
+/* 카드의 링크·기간·자격 표시는 모두 policy(공고 DB 값)에서만 만든다. reason·check_points 는 문구로만 보여준다. */
+
+function deadline(p: PolicyCandidate): { label: string; tone: string } {
+  if (p.availability === "upcoming") {
+    const start = formatDate(p.apply_start);
+    return { label: start ? `${start.slice(5)} 접수 시작` : "접수 예정", tone: "text-brand" };
+  }
+  const d = daysLeft(p.apply_end);
+  if (d != null && d >= 0) {
+    if (d <= 14) return { label: `D-${d}`, tone: "text-[#f04452]" };
+    return { label: `~${formatDate(p.apply_end)!.slice(5)}`, tone: "text-brand" };
+  }
+  if (p.availability === "open") return { label: "신청 중", tone: "text-[#03b26c]" };
+  return { label: "기간 확인 필요", tone: "text-grey-500" };
 }
 
-function deadline(p: RecPolicy): { label: string; tone: string } {
-  if (p.alwaysOpen) return { label: "상시", tone: "text-grey-500" };
-  const d = daysLeft(p.applyEnd);
-  if (d == null) return { label: p.firstCome ? "선착순" : "기간 확인", tone: "text-grey-500" };
-  if (d <= 14) return { label: `D-${Math.max(0, d)}`, tone: "text-[#f04452]" };
-  return { label: `~${formatDate(p.applyEnd)!.slice(5)}`, tone: "text-brand" };
+function ageLabel(p: PolicyCandidate) {
+  const { age_limited, min_age: min, max_age: max } = p.eligibility;
+  if (!age_limited || (min == null && max == null)) return "나이 제한 없음";
+  if (min != null && max != null) return `만 ${min}~${max}세`;
+  return min != null ? `만 ${min}세 이상` : `만 ${max}세 이하`;
 }
 
-/** animate=false: 상세 페이지에서 돌아와 복원된 경우 — 숫자 카운트업·등장 애니메이션 없이 바로 */
-export function RecommendationView({ rec, animate = true, meta }: { rec: ResultReply; animate?: boolean; meta?: FeedbackMeta }) {
-  // 대출은 갚아야 하는 돈이라 '받을 수 있는 지원금' 합계에서 뺀다
-  const total = rec.policies.filter((p) => p.type !== "대출·이자지원").reduce((s, p) => s + (p.benefitAmount ?? 0), 0);
-  const shown = useCountUp(total, animate);
-  const monthly = rec.monthly ?? 30;
+function regionLabel(p: PolicyCandidate): { text: string; warn: boolean } {
+  const e = p.eligibility;
+  if (e.region_scope === "national") return { text: "전국", warn: false };
+  const names = e.sido_codes.map((c) => SIDO_NAME[c]).filter(Boolean);
+  const sido = names.length === 0 ? "지역" : names.length <= 2 ? names.join("·") : `${names[0]} 외 ${names.length - 1}곳`;
+  return e.region_scope === "sigungu" ? { text: `${sido} 일부 시군구만`, warn: true } : { text: `${sido} 거주`, warn: false };
+}
 
+const LINK_LABEL = { apply: "신청 페이지", reference: "안내 페이지", ontong_detail: "온통청년 상세" } as const;
+/** DB에서 온 값이라도 http(s) 주소일 때만 링크로 쓴다 */
+const safeUrl = (u: string) => (/^https?:\/\//i.test(u) ? u : null);
+
+/** animate=false: 복원된 대화 — 등장 애니메이션 없이 바로 */
+export function RecommendationView({ rec, animate = true, meta }: { rec: RecResult; animate?: boolean; meta?: FeedbackMeta }) {
   return (
     <div className="mt-6">
-      {total > 0 && (
-        <div className="animate-fade-up">
-          <p className="text-[15px] text-grey-600">추천 정책 지원금을 모두 받으면</p>
-          <p className="mt-1 text-[32px] font-bold leading-tight tracking-tight text-grey-900">
-            최대 <span className="tabular-nums text-brand">{formatManwon(shown)}</span>
-          </p>
-          <p className="mt-1 text-[12px] text-grey-400">대출을 빼고 공고에 금액이 적힌 정책만 더한 값이에요 · 정책 후보 {rec.candidateCount}건 중에서 골랐어요</p>
-        </div>
-      )}
+      <section>
+        <SectionHead title="추천 정책" count={rec.items.length} />
+        <ul className="-mx-3 mt-1">
+          {rec.items.map((item, i) => (
+            <li key={item.policy.plcy_no} className={cn(animate && "animate-fade-up")} style={animate ? stagger(i + 1) : undefined}>
+              <PolicyCard item={item} />
+            </li>
+          ))}
+        </ul>
+      </section>
 
-      {rec.policies.length > 0 && (
-        <section className="mt-8">
-          <SectionHead title="청년 정책" count={rec.policies.length} />
-          <ul className="-mx-3 mt-1">
-            {rec.policies.map((p, i) => {
-              const dl = deadline(p);
-              return (
-                <li key={p.id} className="animate-fade-up" style={stagger(i + 1)}>
-                  <Link href={`/policies/${p.id}`} className="pressable group flex items-start gap-3.5 rounded-2xl px-3 py-3.5 hover:bg-grey-50">
-                    <InterestIcon interest={p.interest} />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-1.5 text-[13px]">
-                        <span className={cn("font-semibold", dl.tone)}>{dl.label}</span>
-                        <span className="text-grey-300">·</span>
-                        <span className={cn("font-medium", p.status === "pass" ? "text-[#03b26c]" : "text-[#fe9800]")}>
-                          {p.status === "pass" ? "자격 충족" : "확인 필요"}
-                        </span>
-                        <span className="text-grey-300">·</span>
-                        <span className="truncate text-grey-500">{p.org}</span>
-                      </span>
-                      <span className="mt-0.5 block text-[16px] font-semibold leading-snug text-grey-900">{p.name}</span>
-                      {p.benefit && <span className="mt-1 line-clamp-2 block text-[14px] leading-snug text-grey-700">{p.benefit}</span>}
-                      <span className="mt-1.5 block text-[13px] leading-snug text-brand">{p.reason}</span>
-                      {p.caution && <span className="mt-1 block text-[12px] leading-snug text-grey-500">⚠ {p.caution}</span>}
-                      {p.checks.length > 0 && (
-                        <span className="mt-2 flex flex-wrap gap-1">
-                          {p.checks.map((c) => (
-                            <span
-                              key={c.key + c.text}
-                              className={cn(
-                                "rounded-md px-1.5 py-0.5 text-[11px] font-medium",
-                                c.status === "pass" ? "bg-[#e5f8f1] text-[#03b26c]" : "bg-[#fff4e5] text-[#fe9800]",
-                              )}
-                            >
-                              {c.status === "pass" ? "✓" : "?"} {c.text}
-                            </span>
-                          ))}
-                        </span>
-                      )}
-                    </span>
-                    <ChevronRight className="mt-6 size-5 shrink-0 text-grey-300 transition-colors group-hover:text-grey-500" />
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      )}
-
-      {rec.savings.length > 0 && (
-        <section className="mt-6">
-          <SectionHead title="예적금" count={rec.savings.length} />
-          <ul className="-mx-3 mt-1">
-            {rec.savings.map((p, i) => {
-              const exp = monthly > 0 ? estimateMaturity(monthly, p.term, p.maxRate).total : null;
-              return (
-                <li key={p.id} className="animate-fade-up" style={stagger(rec.policies.length + i + 1)}>
-                  <Link href={`/products/${p.id}`} className="pressable group flex items-center gap-3.5 rounded-2xl px-3 py-3.5 hover:bg-grey-50">
-                    <BankMark bank={p.company} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] text-grey-500">
-                        {p.company} · {p.reserveType ?? "적금"} {p.term}개월{p.youth && " · 청년"}
-                      </span>
-                      <span className="mt-0.5 block truncate text-[16px] font-semibold text-grey-900">{p.name}</span>
-                      <span className="mt-0.5 block text-[13px] leading-snug text-grey-600">
-                        {p.reason}
-                        {exp && <span className="text-grey-400"> · 월 {monthly}만원이면 만기 약 {formatManwon(exp)}</span>}
-                      </span>
-                    </span>
-                    <span className="shrink-0 text-right">
-                      <span className="block text-[17px] font-bold tabular-nums text-brand">{p.maxRate.toFixed(2)}%</span>
-                      <span className="block text-[12px] tabular-nums text-grey-400">기본 {p.baseRate.toFixed(2)}%</span>
-                    </span>
-                    <ChevronRight className="size-5 shrink-0 text-grey-300 transition-colors group-hover:text-grey-500" />
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-      )}
-
-      <FeedbackBar ids={[...rec.policies, ...rec.savings].map((x) => x.id)} meta={meta} />
+      <FeedbackBar ids={rec.items.map((x) => x.policy.plcy_no)} meta={meta} />
 
       <p className="mt-4 text-[12px] leading-relaxed text-grey-400">
-        온통청년·금융감독원 공시 데이터를 AI로 정리해 자격 조건을 대조했어요 · 실제 자격은 기관 심사에 따라 달라질 수 있어요 ·
-        금융상품 가입 권유가 아닌 공시 정보 안내예요 ·{" "}
+        온통청년 공고 데이터로 자격 조건을 대조했어요({formatDate(rec.asOf)} 기준) · 링크와 신청 기간은 공고에 등록된 값이에요 · 실제 자격은 기관
+        심사에 따라 달라질 수 있어요 ·{" "}
         <Link href="/privacy" className="underline underline-offset-2">
           이용안내·개인정보
         </Link>
       </p>
     </div>
+  );
+}
+
+function PolicyCard({ item }: { item: Recommendation }) {
+  const p = item.policy;
+  const dl = deadline(p);
+  const region = regionLabel(p);
+  const url = safeUrl(p.official_url);
+  const chips: { text: string; warn?: boolean }[] = [
+    { text: ageLabel(p) },
+    region,
+    ...(p.eligibility.employment.length
+      ? [{ text: p.eligibility.employment.length <= 2 ? p.eligibility.employment.join("·") : `${p.eligibility.employment[0]} 외 ${p.eligibility.employment.length - 1}` }]
+      : []),
+  ];
+  const body = (
+    <>
+      <CategoryIcon categories={p.categories} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1.5 text-[13px]">
+          <span className={cn("shrink-0 font-semibold", dl.tone)}>{dl.label}</span>
+          {p.org_name && (
+            <>
+              <span className="text-grey-300">·</span>
+              <span className="truncate text-grey-500">{p.org_name}</span>
+            </>
+          )}
+        </span>
+        <span className="mt-0.5 block text-[16px] font-semibold leading-snug text-grey-900">{p.name}</span>
+        <span className="mt-1.5 block text-[14px] leading-snug text-grey-700">{item.reason}</span>
+        <span className="mt-2 flex flex-wrap gap-1">
+          {chips.map((c) => (
+            <span
+              key={c.text}
+              className={cn("rounded-md px-1.5 py-0.5 text-[11px] font-medium", c.warn ? "bg-[#fff4e5] text-[#fe9800]" : "bg-grey-100 text-grey-600")}
+            >
+              {c.text}
+            </span>
+          ))}
+        </span>
+        {item.check_points.length > 0 && (
+          <span className="mt-2.5 block rounded-xl bg-grey-50 px-3 py-2.5">
+            <span className="block text-[12px] font-semibold text-grey-600">신청 전에 확인하세요</span>
+            {item.check_points.map((c) => (
+              <span key={c} className="mt-1 flex gap-1.5 text-[13px] leading-snug text-grey-700">
+                <span aria-hidden className="mt-[3px] size-3 shrink-0 rounded-[4px] border-[1.5px] border-grey-300" />
+                {c}
+              </span>
+            ))}
+          </span>
+        )}
+        {url && (
+          <span className="mt-2.5 flex items-center gap-0.5 text-[13px] font-semibold text-brand">
+            {LINK_LABEL[p.url_source] ?? "공식 페이지"} 열기
+            <ArrowUpRight className="size-3.5" strokeWidth={2.4} />
+          </span>
+        )}
+      </span>
+    </>
+  );
+  const cls = "flex items-start gap-3.5 rounded-2xl px-3 py-3.5";
+  return url ? (
+    <a href={url} target="_blank" rel="noopener noreferrer" className={cn(cls, "pressable hover:bg-grey-50")}>
+      {body}
+    </a>
+  ) : (
+    <div className={cls}>{body}</div>
   );
 }
 

@@ -6,10 +6,10 @@ import { ArrowUp } from "lucide-react";
 import { STORE_KEY } from "@/lib/chat-flow";
 
 const SUGGESTIONS = [
-  "서울 사는 취준생인데 지원금이랑 적금 추천해줘",
+  "서울 사는 26살 취준생인데 지원금 알려줘",
   "자취 중인데 월세 지원 받을 수 있을까?",
-  "사회초년생 목돈 모으기 좋은 적금",
-  "자격증 교육비 지원",
+  "부산 사는 직장인 목돈 마련 지원",
+  "광주 사는 대학생 교육비 지원",
 ];
 
 /** 홈 히어로 입력창 — 보내면 /chat 으로 넘어가 대화가 시작된다 */
@@ -36,7 +36,7 @@ export function ChatComposer() {
 
   return (
     <div className="w-full">
-      <p className="text-[15px] font-semibold text-brand">온통청년 · 금융감독원 데이터 기반</p>
+      <p className="text-[15px] font-semibold text-brand">온통청년 청년정책 데이터 기반</p>
       <h1 className="mt-3 text-[32px] font-bold leading-[1.3] tracking-tight text-grey-900 sm:text-[40px]">
         나에게 맞는 청년 혜택,
         <br />
@@ -45,7 +45,7 @@ export function ChatComposer() {
       <p className="mt-4 break-keep text-[17px] leading-relaxed text-grey-600">
         한 문장으로 말하면 몇 가지만 여쭤보고,
         <br />
-        받을 수 있는 지원금과 우대 예적금을 골라드려요.
+        지금 신청할 수 있는 청년 정책을 골라드려요.
       </p>
 
       <form
