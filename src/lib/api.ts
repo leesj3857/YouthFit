@@ -133,9 +133,21 @@ async function request<T>(path: string, init?: { method?: "GET" | "POST"; body?:
   return (await res.json()) as T;
 }
 
+/** 세션 생성 때 함께 보낼 수 있는 인적 조건. 보낸 필드는 문장에서 다시 뽑지 않는다 */
+export interface ProfileFields {
+  age?: number | null;
+  sido_code?: string | null;
+  employment_status?: EmploymentStatus | null;
+  interests?: InterestCode[];
+}
+
 /** 1) 자연어 한 문장으로 세션 생성 → 역질문 + 1차 후보 */
-export const createSession = (query: string) =>
-  request<SessionResponse>("/v1/sessions", { method: "POST", body: { query: query.slice(0, 500) } });
+export const createSession = (query: string, fields: ProfileFields = {}) =>
+  request<SessionResponse>("/v1/sessions", { method: "POST", body: { ...fields, query: query.slice(0, 500) } });
+
+/** 문장에서 어떤 조건이 읽히는지만 확인 (룰 필터, LLM·세션·호출 제한 없음) */
+export const extractConditions = (query: string) =>
+  request<CandidateResponse>("/v1/candidates", { method: "POST", body: { query: query.slice(0, 500) } }).then((r) => r.conditions);
 
 /** 2) 칩 답변 반영 → 좁혀진 후보. 보낼 때마다 이전 답 전체를 덮어쓴다 */
 export const submitAnswers = (sessionId: string, answers: ApiAnswer[]) =>

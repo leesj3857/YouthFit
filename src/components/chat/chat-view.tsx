@@ -9,10 +9,12 @@ import {
   INTEREST_LABEL,
   SIDO_NAME,
   createSession,
+  extractConditions,
   getRecommendations,
   submitAnswers,
   type ApiAnswer,
   type AppliedConditions,
+  type ProfileFields,
   type RecommendationResponse,
   type SessionResponse,
 } from "@/lib/api";
@@ -62,6 +64,12 @@ type Msg = (
 type Session = { id: string; questions: Question[]; conditions: AppliedConditions; total: number };
 /** 질문 id → 고른 선택지 value 들 (건너뛴 질문은 없음) */
 type Answers = Record<string, string[]>;
+/**
+ * 같은 대화에서 새 문장으로 다시 찾을 때 이어 쓰는 정보.
+ * 나이·지역·취업상태·관심사는 새 세션 생성 때 함께 보내고, 칩 답(학력·혼인 등)은 질문 종류(variable)별로 기억해 두었다가
+ * 새 세션이 같은 질문을 내면 자동으로 답한다 → 이미 말한 정보를 다시 묻지 않는다.
+ */
+type Carry = ProfileFields & { byVar: Record<string, string[]> };
 type Snapshot = {
   query?: string;
   messages: Msg[];
@@ -69,6 +77,7 @@ type Snapshot = {
   queue: Question[];
   acc: Answers;
   rec: RecResult | null;
+  carry?: Carry | null;
 };
 
 const isThinking = (m?: Msg) => m?.role === "assistant" && m.kind === "thinking";
@@ -104,6 +113,36 @@ function introText(s: Session) {
   return `${head} 지금 조건으로 신청할 수 있는 정책 후보가 **${s.total.toLocaleString()}건**이에요.${region}`;
 }
 
+const VAR_LABEL: Record<string, string> = { school: "학력", marriage: "혼인 여부", income_bucket: "소득", sigungu: "사는 시군구" };
+
+/** 서버가 확정한 조건 + 이번 세션에서 고른 칩 답을 다음 질문용으로 정리 */
+function toCarry(s: Session, answers: Answers, prev: Carry | null): Carry {
+  const c = s.conditions;
+  const byVar: Record<string, string[]> = { ...(prev?.byVar ?? {}) };
+  // 시도가 바뀌었으면 이전 시군구 답은 의미가 없다
+  if (prev && prev.sido_code !== c.sido_code) delete byVar.sigungu;
+  for (const q of s.questions) if (answers[q.id]) byVar[q.variable] = answers[q.id];
+  return { age: c.age, sido_code: c.sido_code, employment_status: c.employment_status, interests: c.interests, byVar };
+}
+
+/** 새 문장에서 읽힌 조건은 새 값으로, 읽히지 않은 조건은 이전 값으로 */
+function mergeFields(prev: Carry, ext: AppliedConditions): { fields: ProfileFields; kept: string[] } {
+  const f = new Set(ext.from_query);
+  const kept: string[] = [];
+  const pick = <K extends "age" | "sido_code" | "employment_status">(k: K, label: string) => {
+    if (f.has(k)) return ext[k];
+    if (prev[k] != null) kept.push(label);
+    return prev[k] ?? null;
+  };
+  const fields: ProfileFields = {
+    age: pick("age", "나이"),
+    sido_code: pick("sido_code", "지역"),
+    employment_status: pick("employment_status", "취업 상태"),
+    interests: f.has("interests") && ext.interests.length ? ext.interests : (prev.interests ?? []),
+  };
+  return { fields, kept };
+}
+
 function feedbackMeta(c: AppliedConditions): FeedbackMeta {
   return {
     age: c.age ?? undefined,
@@ -129,6 +168,8 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   const runToken = useRef(0);
   const startedOnce = useRef(false);
   const firstQuery = useRef<string | undefined>(undefined);
+  /** 같은 대화에서 이어 쓸 인적 정보·칩 답 (새로 찾기 전까지 유지) */
+  const carry = useRef<Carry | null>(null);
   /** 실패했을 때 "다시 시도"가 다시 실행할 동작 */
   const retry = useRef<(() => void) | null>(null);
 
@@ -209,6 +250,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       const r = await thinkWhile(STEPS_FINAL, work, token);
       if (!r) return;
       retry.current = null;
+      carry.current = toCarry(s, acc.current, carry.current);
       const before = s.total;
       session.current = { ...s, total: r.total };
       const chips = s.questions.length ? [CHIP_REANSWER, CHIP_RESET] : [CHIP_RESET];
@@ -249,11 +291,19 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
         firstQuery.current = query;
         syncUrl(query);
       }
+      const prev = carry.current;
       const run = async (t: number) => {
         retry.current = () => void run(runToken.current);
-        const r = await thinkWhile<SessionResponse>(STEPS_INTRO, createSession(query), t);
-        if (!r) return;
+        // 같은 대화의 두 번째 질문부터: 문장에 없는 인적 정보는 앞에서 받은 값을 함께 보낸다
+        const work = (async (): Promise<{ res: SessionResponse; kept: string[] }> => {
+          if (!prev) return { res: await createSession(query), kept: [] };
+          const { fields, kept } = mergeFields(prev, await extractConditions(query));
+          return { res: await createSession(query, fields), kept };
+        })();
+        const out = await thinkWhile(STEPS_INTRO, work, t);
+        if (!out) return;
         retry.current = null;
+        const r = out.res;
         const s: Session = {
           id: r.session_id,
           questions: r.questions.map(toQuestion),
@@ -261,6 +311,22 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
           total: r.candidates.policies.total,
         };
         session.current = s;
+        // 이전에 답한 칩과 같은 질문은 자동으로 답하고 묻지 않는다 (선택지에 있는 값일 때만)
+        const known: Record<string, string[]> = { ...(prev?.byVar ?? {}) };
+        if (!prev || prev.sido_code !== s.conditions.sido_code) delete known.sigungu;
+        const reused: string[] = [];
+        const ask: Question[] = [];
+        for (const q of s.questions) {
+          const v = known[q.variable];
+          const opts = q.widget.type === "single" || q.widget.type === "multi" ? q.widget.options : [];
+          if (v?.length && v.every((x) => opts.some((o) => o.value === x))) {
+            acc.current[q.id] = v;
+            reused.push(VAR_LABEL[q.variable] ?? q.variable);
+          } else ask.push(q);
+        }
+        carry.current = toCarry(s, acc.current, prev);
+        const keptAll = [...out.kept, ...reused];
+        const keptLine = keptAll.length ? `앞에서 알려주신 ${keptAll.join("·")}은 그대로 반영했어요.\n` : "";
         if (s.total === 0) {
           push({
             id: nid(), role: "assistant", kind: "text",
@@ -270,8 +336,13 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
           setBusy(false);
           return;
         }
-        queue.current = [...s.questions];
-        if (!askFromQueue(`${introText(s)}\n더 정확히 고르려고 몇 가지만 여쭤볼게요.\n\n`)) await finish(t);
+        queue.current = ask;
+        if (!ask.length) {
+          if (keptLine) push({ id: nid(), role: "assistant", kind: "text", text: `${introText(s)}\n${keptLine.trim()}` });
+          await finish(t);
+          return;
+        }
+        if (!askFromQueue(`${introText(s)}\n${keptLine}더 정확히 고르려고 몇 가지만 여쭤볼게요.\n\n`)) await finish(t);
       };
       await run(token);
     },
@@ -345,6 +416,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     pendingId.current = null;
     rec.current = null;
     retry.current = null;
+    carry.current = null;
     firstQuery.current = undefined;
     setMessages([]);
     setBusy(false);
@@ -374,6 +446,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       queue.current = snap.queue;
       acc.current = snap.acc;
       rec.current = snap.rec;
+      carry.current = snap.carry ?? null;
       firstQuery.current = snap.query;
       const last = snap.messages.at(-1);
       if (last?.role === "assistant" && last.kind === "text" && last.question && !last.answered) pendingId.current = last.id;
@@ -402,6 +475,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
           queue: queue.current,
           acc: acc.current,
           rec: rec.current,
+          carry: carry.current,
         };
         sessionStorage.setItem(STORE_KEY, JSON.stringify(snap));
       }
@@ -558,7 +632,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
                   ? "어떤 혜택이 궁금하세요?"
                   : waitingAnswer
                     ? "선택지를 고르거나 직접 입력해도 괜찮아요"
-                    : "다른 조건으로 다시 물어보세요"
+                    : "다른 분야도 물어보세요 (나이·지역은 그대로 써요)"
               }
               aria-label="메시지 입력"
               className="field-sizing-content max-h-40 min-h-[40px] flex-1 resize-none bg-transparent py-2 text-[16px] leading-6 text-grey-900 outline-none placeholder:text-grey-400"
