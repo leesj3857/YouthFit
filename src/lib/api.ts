@@ -86,6 +86,8 @@ export interface RecommendationResponse {
   session_id: string;
   as_of: string;
   items: Recommendation[];
+  /** 이미 본 정책을 빼고도 더 보여줄 정책이 남았는지 (true 일 때만 「더 보기」) */
+  has_more: boolean;
 }
 
 export class ApiError extends Error {
@@ -153,9 +155,20 @@ export const extractConditions = (query: string) =>
 export const submitAnswers = (sessionId: string, answers: ApiAnswer[]) =>
   request<SessionResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/answers`, { method: "POST", body: { answers } });
 
-/** 3) 최종 추천 (최대 5건 + 선정 사유) */
-export const getRecommendations = (sessionId: string) =>
-  request<RecommendationResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/recommendations`, { method: "POST" });
+/** 서버가 받는 제외 목록 최대 개수 (넘으면 422) */
+export const MAX_EXCLUDE = 45;
+
+/**
+ * 3) 최종 추천 (최대 5건 + 선정 사유).
+ * 「더 보기」는 같은 세션·같은 주소에 화면에 쌓인 plcy_no 전체를 exclude 로 보내 다음 묶음을 받는다.
+ */
+export const getRecommendations = (sessionId: string, exclude: string[] = []) => {
+  const ids = [...new Set(exclude.filter(Boolean))].slice(0, MAX_EXCLUDE);
+  return request<RecommendationResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/recommendations`, {
+    method: "POST",
+    body: ids.length ? { exclude_plcy_nos: ids } : undefined,
+  });
+};
 
 /* ---------- 표시용 라벨 ---------- */
 

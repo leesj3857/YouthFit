@@ -11,6 +11,7 @@ import {
   createSession,
   extractConditions,
   getRecommendations,
+  MAX_EXCLUDE,
   submitAnswers,
   type ApiAnswer,
   type AppliedConditions,
@@ -19,17 +20,20 @@ import {
   type SessionResponse,
 } from "@/lib/api";
 import {
+  CHIP_MORE,
   CHIP_REANSWER,
   CHIP_RESET,
   CHIP_RETRY,
   SLOW_NOTICE,
   STEPS_FINAL,
+  STEPS_MORE,
   STEPS_INTRO,
   STORE_KEY,
   formatAnswer,
   matchOption,
   toQuestion,
   toValues,
+  wantsMore,
   type AnswerValue,
   type Question,
 } from "@/lib/chat-flow";
@@ -78,6 +82,7 @@ type Snapshot = {
   acc: Answers;
   rec: RecResult | null;
   carry?: Carry | null;
+  shown?: string[];
 };
 
 const isThinking = (m?: Msg) => m?.role === "assistant" && m.kind === "thinking";
@@ -143,6 +148,15 @@ function mergeFields(prev: Carry, ext: AppliedConditions): { fields: ProfileFiel
   return { fields, kept };
 }
 
+/** 추천 결과 아래 칩: 더 볼 게 남았으면 「더 보기」, 질문이 있었으면 「답변 다시 고르기」, 항상 「처음부터」 */
+function afterChips(hasMore: boolean, hasQuestions: boolean, shownCount: number) {
+  return [
+    ...(hasMore && shownCount < MAX_EXCLUDE ? [CHIP_MORE] : []),
+    ...(hasQuestions ? [CHIP_REANSWER] : []),
+    CHIP_RESET,
+  ];
+}
+
 function feedbackMeta(c: AppliedConditions): FeedbackMeta {
   return {
     age: c.age ?? undefined,
@@ -168,6 +182,8 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   const runToken = useRef(0);
   const startedOnce = useRef(false);
   const firstQuery = useRef<string | undefined>(undefined);
+  /** 이 세션에서 지금까지 화면에 보여준 정책 plcy_no — 「더 보기」 때 제외 목록으로 보낸다 */
+  const shown = useRef<string[]>([]);
   /** 같은 대화에서 이어 쓸 인적 정보·칩 답 (새로 찾기 전까지 유지) */
   const carry = useRef<Carry | null>(null);
   /** 실패했을 때 "다시 시도"가 다시 실행할 동작 */
@@ -253,7 +269,8 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       carry.current = toCarry(s, acc.current, carry.current);
       const before = s.total;
       session.current = { ...s, total: r.total };
-      const chips = s.questions.length ? [CHIP_REANSWER, CHIP_RESET] : [CHIP_RESET];
+      const chips = afterChips(r.res.has_more, s.questions.length > 0, r.res.items.length);
+      shown.current = r.res.items.map((x) => x.policy.plcy_no);
       if (r.res.items.length === 0) {
         rec.current = null;
         push({
@@ -264,7 +281,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
         setBusy(false);
         return;
       }
-      const result: RecResult = { asOf: r.res.as_of, total: r.total, items: r.res.items };
+      const result: RecResult = { asOf: r.res.as_of, total: r.total, items: r.res.items, hasMore: r.res.has_more, page: 1 };
       rec.current = result;
       const narrowedText = answers.length && r.total < before ? `답변을 반영하니 후보가 **${r.total.toLocaleString()}건**으로 좁혀졌어요. ` : `후보 **${r.total.toLocaleString()}건** 가운데 `;
       push({
@@ -286,6 +303,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       acc.current = {};
       pendingId.current = null;
       rec.current = null;
+      shown.current = [];
       push({ id: nid(), role: "user", text: query });
       if (!firstQuery.current) {
         firstQuery.current = query;
@@ -379,12 +397,49 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
   }
 
   /** 같은 세션에서 질문에 다시 답한다 (서버가 이전 답을 전부 덮어쓴다) */
+  /** 같은 세션에서 이미 본 정책을 빼고 다음 묶음을 받는다 */
+  async function more(userText = "다른 정책도 더 보여줘") {
+    const s = session.current;
+    if (!s) return reset();
+    const token = runToken.current;
+    setBusy(true);
+    push({ id: nid(), role: "user", text: userText });
+    const run = async (t: number) => {
+      retry.current = () => void run(runToken.current);
+      const r = await thinkWhile(STEPS_MORE, getRecommendations(s.id, shown.current), t);
+      if (!r) return;
+      retry.current = null;
+      const hasQ = s.questions.length > 0;
+      if (r.items.length === 0) {
+        push({
+          id: nid(), role: "assistant", kind: "text",
+          text: "지금 조건으로 더 보여드릴 정책이 없어요. 답변을 바꾸거나 다른 분야를 물어봐 주세요.",
+          followUps: afterChips(false, hasQ, 0),
+        });
+        setBusy(false);
+        return;
+      }
+      shown.current = [...shown.current, ...r.items.map((x) => x.policy.plcy_no)];
+      const page = (rec.current?.page ?? 1) + 1;
+      const result: RecResult = { asOf: r.as_of, total: s.total, items: r.items, hasMore: r.has_more, page };
+      rec.current = result;
+      push({
+        id: nid(), role: "assistant", kind: "text",
+        text: `이어서 **${r.items.length}건** 더 골랐어요. 지금까지 **${shown.current.length}건**을 보여드렸어요.`,
+        rec: result, meta: feedbackMeta(s.conditions), followUps: afterChips(r.has_more, hasQ, shown.current.length),
+      });
+      setBusy(false);
+    };
+    await run(token);
+  }
+
   function reanswer() {
     const s = session.current;
     if (!s?.questions.length) return reset();
     push({ id: nid(), role: "user", text: "답변을 다시 고를게요" });
     acc.current = {};
     rec.current = null;
+    shown.current = [];
     queue.current = [...s.questions];
     askFromQueue("좋아요, 처음부터 다시 여쭤볼게요.\n\n");
   }
@@ -393,6 +448,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     if (busy) return;
     if (text === CHIP_RESET) return reset();
     if (text === CHIP_REANSWER) return reanswer();
+    if (text === CHIP_MORE) return void more();
     if (text === CHIP_RETRY && retry.current) {
       setBusy(true);
       return retry.current();
@@ -404,6 +460,10 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     if (!text || busy) return;
     setInput("");
     if (pendingId.current) freeAnswer(text);
+    // 추천을 본 뒤 "더 보여줘" 같은 짧은 말 → 같은 세션에서 다음 묶음
+    else if (rec.current?.hasMore && wantsMore(text)) {
+      void more(text);
+    }
     // 추천 뒤에(또는 처음에) 새 문장을 보내면 그 문장으로 새로 찾는다
     else void start(text);
   }
@@ -415,6 +475,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
     acc.current = {};
     pendingId.current = null;
     rec.current = null;
+    shown.current = [];
     retry.current = null;
     carry.current = null;
     firstQuery.current = undefined;
@@ -446,6 +507,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
       queue.current = snap.queue;
       acc.current = snap.acc;
       rec.current = snap.rec;
+      shown.current = snap.shown ?? [];
       carry.current = snap.carry ?? null;
       firstQuery.current = snap.query;
       const last = snap.messages.at(-1);
@@ -476,6 +538,7 @@ export function ChatView({ initialQuery }: { initialQuery?: string }) {
           acc: acc.current,
           rec: rec.current,
           carry: carry.current,
+          shown: shown.current,
         };
         sessionStorage.setItem(STORE_KEY, JSON.stringify(snap));
       }

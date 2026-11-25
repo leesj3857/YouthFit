@@ -9,7 +9,14 @@ import { CategoryIcon } from "@/components/catalog-icons";
 import { cn } from "@/lib/utils";
 
 /** 최종 추천 결과 (백엔드 /recommendations 응답 + 좁혀진 후보 수) */
-export type RecResult = { asOf: string; total: number; items: Recommendation[] };
+export type RecResult = {
+  asOf: string;
+  total: number;
+  items: Recommendation[];
+  hasMore: boolean;
+  /** 1 = 첫 추천, 2부터 「더 보기」로 받은 묶음 */
+  page: number;
+};
 /** 피드백 분석용 요약 (원문 대화는 보내지 않음) */
 export type FeedbackMeta = { age?: number; sido?: string; employment?: string; domains?: string[] };
 
@@ -55,7 +62,7 @@ export function RecommendationView({ rec, animate = true, meta }: { rec: RecResu
   return (
     <div className="mt-6">
       <section>
-        <SectionHead title="추천 정책" count={rec.items.length} />
+        <SectionHead title={rec.page > 1 ? "추가 추천" : "추천 정책"} count={rec.items.length} />
         <ul className="-mx-3 mt-1">
           {rec.items.map((item, i) => (
             <li key={item.policy.plcy_no} className={cn(animate && "animate-fade-up")} style={animate ? stagger(i + 1) : undefined}>

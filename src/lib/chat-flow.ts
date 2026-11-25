@@ -67,9 +67,19 @@ export const STORE_KEY = "youthfit-chat-v3";
 
 export const STEPS_INTRO = ["질문 이해하기", "청년 정책 검색", "자격 조건 대조", "추가로 필요한 정보 정리"];
 export const STEPS_FINAL = ["답변 반영하기", "후보 좁히기", "추천 이유 정리"];
+export const STEPS_MORE = ["이미 본 정책 빼기", "남은 후보 다시 고르기", "추천 이유 정리"];
+
+/** 추천 뒤 짧게 "더 보여줘"·"다른 거 없어?" 라고 입력한 경우 → 새 검색 대신 「더 보기」 */
+export function wantsMore(text: string) {
+  const t = text.replace(/\s/g, "");
+  if (t.length > 14) return false;
+  // 앞부분이 "더 / 좀 더 / 다른 거(도) / 또" 로 시작하는 짧은 말만. "월세 지원 더 있어?"처럼 주제가 붙으면 새로 찾는다
+  return /^(좀더|더|다른(거|것|정책)?(도|은|는)?|또)(더)?(보여|알려|추천|있|없|줘|주세요|요|\?|$)/.test(t);
+}
 /** 무료 서버가 잠들어 있다가 깨어날 때 보여줄 문구 */
 export const SLOW_NOTICE = "서버를 깨우는 중이에요. 처음엔 1분쯤 걸릴 수 있어요";
 
+export const CHIP_MORE = "다른 정책 더 보기";
 export const CHIP_REANSWER = "답변 다시 고르기";
 export const CHIP_RETRY = "다시 시도";
 export const CHIP_RESET = "처음부터 다시 찾기";
